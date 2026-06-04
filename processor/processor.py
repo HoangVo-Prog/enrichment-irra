@@ -8,6 +8,12 @@ from torch.utils.tensorboard import SummaryWriter
 from prettytable import PrettyTable
 
 
+def meter_scalar(value):
+    if torch.is_tensor(value):
+        return value.detach().item()
+    return value
+
+
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
              scheduler, checkpointer):
 
@@ -51,15 +57,15 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             total_loss = sum([v for k, v in ret.items() if "loss" in k])
 
             batch_size = batch['images'].shape[0]
-            meters['loss'].update(total_loss.item(), batch_size)
-            meters['sdm_loss'].update(ret.get('sdm_loss', 0), batch_size)
-            meters['itc_loss'].update(ret.get('itc_loss', 0), batch_size)
-            meters['id_loss'].update(ret.get('id_loss', 0), batch_size)
-            meters['mlm_loss'].update(ret.get('mlm_loss', 0), batch_size)
+            meters['loss'].update(meter_scalar(total_loss), batch_size)
+            meters['sdm_loss'].update(meter_scalar(ret.get('sdm_loss', 0)), batch_size)
+            meters['itc_loss'].update(meter_scalar(ret.get('itc_loss', 0)), batch_size)
+            meters['id_loss'].update(meter_scalar(ret.get('id_loss', 0)), batch_size)
+            meters['mlm_loss'].update(meter_scalar(ret.get('mlm_loss', 0)), batch_size)
 
-            meters['img_acc'].update(ret.get('img_acc', 0), batch_size)
-            meters['txt_acc'].update(ret.get('txt_acc', 0), batch_size)
-            meters['mlm_acc'].update(ret.get('mlm_acc', 0), 1)
+            meters['img_acc'].update(meter_scalar(ret.get('img_acc', 0)), batch_size)
+            meters['txt_acc'].update(meter_scalar(ret.get('txt_acc', 0)), batch_size)
+            meters['mlm_acc'].update(meter_scalar(ret.get('mlm_acc', 0)), 1)
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -76,7 +82,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 logger.info(info_str)
         
         tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
-        tb_writer.add_scalar('temperature', ret['temperature'], epoch)
+        tb_writer.add_scalar('temperature', meter_scalar(ret['temperature']), epoch)
         for k, v in meters.items():
             if v.avg > 0:
                 tb_writer.add_scalar(k, v.avg, epoch)
