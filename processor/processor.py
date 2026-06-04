@@ -28,6 +28,12 @@ def _is_scalar(value):
     return torch.is_tensor(value) and value.dim() == 0
 
 
+def _scalar_value(value):
+    if torch.is_tensor(value):
+        return value.detach().float().item()
+    return value
+
+
 def _move_batch(batch, device, keep_images_cpu=False):
     moved = {}
     for key, value in batch.items():
@@ -94,7 +100,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     continue
                 if key not in meters:
                     meters[key] = AverageMeter()
-                meters[key].update(value.detach().float().item(), batch_size)
+                meters[key].update(_scalar_value(value), batch_size)
 
             optimizer.zero_grad()
             total_loss.backward()
@@ -112,7 +118,7 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 logger.info(info_str)
         
         tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
-        tb_writer.add_scalar('temperature', ret['temperature'], epoch)
+        tb_writer.add_scalar('temperature', _scalar_value(ret['temperature']), epoch)
         for k, v in meters.items():
             if v.avg > 0:
                 tb_writer.add_scalar(k, v.avg, epoch)
