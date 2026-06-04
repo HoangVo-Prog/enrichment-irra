@@ -85,11 +85,13 @@ def build_dataloader(args, tranforms=None):
         if args.MLM:
             train_set = ImageTextMLMDataset(dataset.train,
                                      train_transforms,
-                                     text_length=args.text_length)
+                                     text_length=args.text_length,
+                                     text_only=getattr(args, "pnp_text_only", False))
         else:
             train_set = ImageTextDataset(dataset.train,
                                      train_transforms,
-                                     text_length=args.text_length)
+                                     text_length=args.text_length,
+                                     text_only=getattr(args, "pnp_text_only", False))
 
         if args.sampler == 'identity':
             if args.distributed:

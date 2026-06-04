@@ -4,8 +4,38 @@ import torch
 from utils.meter import AverageMeter
 from utils.metrics import Evaluator
 from utils.comm import get_rank, synchronize
-from torch.utils.tensorboard import SummaryWriter
-from prettytable import PrettyTable
+from model.target_pool import TargetPoolManager
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ModuleNotFoundError:
+    class SummaryWriter(object):
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+
+def _unwrap_model(model):
+    return model.module if hasattr(model, "module") else model
+
+
+def _is_scalar(value):
+    return torch.is_tensor(value) and value.dim() == 0
+
+
+def _move_batch(batch, device, keep_images_cpu=False):
+    moved = {}
+    for key, value in batch.items():
+        if keep_images_cpu and key == "images":
+            moved[key] = value
+        else:
+            moved[key] = value.to(device)
+    return moved
 
 
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
@@ -22,20 +52,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     logger = logging.getLogger("IRRA.train")
     logger.info('start training')
 
-    meters = {
-        "loss": AverageMeter(),
-        "sdm_loss": AverageMeter(),
-        "itc_loss": AverageMeter(),
-        "id_loss": AverageMeter(),
-        "mlm_loss": AverageMeter(),
-        "img_acc": AverageMeter(),
-        "txt_acc": AverageMeter(),
-        "mlm_acc": AverageMeter()
-    }
+    meters = {"loss": AverageMeter()}
 
     tb_writer = SummaryWriter(log_dir=args.output_dir)
 
     best_top1 = 0.0
+    target_pool = TargetPoolManager(train_loader.dataset, args, logger) if getattr(args, "target_enrichment", False) else None
 
     # train
     for epoch in range(start_epoch, num_epoch + 1):
@@ -45,26 +67,40 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         model.train()
 
         for n_iter, batch in enumerate(train_loader):
-            batch = {k: v.to(device) for k, v in batch.items()}
+            global_step = arguments["iteration"]
+            use_target = target_pool is not None and epoch >= args.enrichment_start
+            batch = _move_batch(
+                batch,
+                device,
+                keep_images_cpu=use_target and getattr(args, "pnp_text_only", False),
+            )
+            target_cache = None
+            if use_target:
+                target_cache = target_pool.get_train_cache(
+                    _unwrap_model(model), batch, epoch, global_step
+                )
+                pool_reused = target_cache.get("diagnostics", {}).get("pool_interval_reused")
+                if torch.is_tensor(pool_reused) and pool_reused.item() == 0:
+                    synchronize()
 
-            ret = model(batch)
-            total_loss = sum([v for k, v in ret.items() if "loss" in k])
+            ret = model(batch, epoch=epoch, current_step=global_step, target_cache=target_cache)
+            if target_cache is not None and "diagnostics" in target_cache:
+                ret.update(target_cache["diagnostics"])
+            total_loss = ret["loss"] if "loss" in ret else sum([v for k, v in ret.items() if "loss" in k])
 
-            batch_size = batch['images'].shape[0]
-            meters['loss'].update(total_loss.item(), batch_size)
-            meters['sdm_loss'].update(ret.get('sdm_loss', 0), batch_size)
-            meters['itc_loss'].update(ret.get('itc_loss', 0), batch_size)
-            meters['id_loss'].update(ret.get('id_loss', 0), batch_size)
-            meters['mlm_loss'].update(ret.get('mlm_loss', 0), batch_size)
-
-            meters['img_acc'].update(ret.get('img_acc', 0), batch_size)
-            meters['txt_acc'].update(ret.get('txt_acc', 0), batch_size)
-            meters['mlm_acc'].update(ret.get('mlm_acc', 0), 1)
+            batch_size = batch['caption_ids'].shape[0]
+            for key, value in ret.items():
+                if not _is_scalar(value):
+                    continue
+                if key not in meters:
+                    meters[key] = AverageMeter()
+                meters[key].update(value.detach().float().item(), batch_size)
 
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
             synchronize()
+            arguments["iteration"] += 1
 
             if (n_iter + 1) % log_period == 0:
                 info_str = f"Epoch[{epoch}] Iteration[{n_iter + 1}/{len(train_loader)}]"
@@ -107,10 +143,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         logger.info(f"best R1: {best_top1} at epoch {arguments['epoch']}")
 
 
-def do_inference(model, test_img_loader, test_txt_loader):
+def do_inference(model, test_img_loader, test_txt_loader, args=None):
 
     logger = logging.getLogger("IRRA.test")
     logger.info("Enter inferencing")
 
-    evaluator = Evaluator(test_img_loader, test_txt_loader)
+    evaluator = Evaluator(test_img_loader, test_txt_loader, args)
     top1 = evaluator.eval(model.eval())

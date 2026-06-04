@@ -3,21 +3,32 @@
 @author:  sherlock
 @contact: sherlockliao01@gmail.com
 """
-from PIL import Image, ImageFile
 import errno
 import json
 import pickle as pkl
 import os
 import os.path as osp
 import yaml
-from easydict import EasyDict as edict
+try:
+    from easydict import EasyDict as edict
+except ModuleNotFoundError:
+    class edict(dict):
+        def __getattr__(self, key):
+            try:
+                return self[key]
+            except KeyError:
+                raise AttributeError(key)
 
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+        def __setattr__(self, key, value):
+            self[key] = value
 
 
 def read_image(img_path):
     """Keep reading image until succeed.
     This can avoid IOError incurred by heavy IO process."""
+    from PIL import Image, ImageFile
+
+    ImageFile.LOAD_TRUNCATED_IMAGES = True
     got_img = False
     if not osp.exists(img_path):
         raise IOError("{} does not exist".format(img_path))

@@ -51,6 +51,9 @@ if __name__ == '__main__':
     # get image-text pair datasets dataloader
     train_loader, val_img_loader, val_txt_loader, num_classes = build_dataloader(args)
     model = build_model(args, num_classes)
+    if getattr(args, "target_enrichment", False) and getattr(args, "host_ckpt_file", ""):
+        logger.info("Loading host checkpoint for target enrichment from {}".format(args.host_ckpt_file))
+        Checkpointer(model).load(args.host_ckpt_file)
     logger.info('Total params: %2.fM' % (sum(p.numel() for p in model.parameters()) / 1000000.0))
     model.to(device)
 
@@ -67,7 +70,7 @@ if __name__ == '__main__':
 
     is_master = get_rank() == 0
     checkpointer = Checkpointer(model, optimizer, scheduler, args.output_dir, is_master)
-    evaluator = Evaluator(val_img_loader, val_txt_loader)
+    evaluator = Evaluator(val_img_loader, val_txt_loader, args)
 
     start_epoch = 1
     if args.resume:

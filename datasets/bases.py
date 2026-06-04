@@ -4,8 +4,7 @@ import os.path as osp
 import logging
 import torch
 from utils.iotools import read_image
-from utils.simple_tokenizer import SimpleTokenizer
-from prettytable import PrettyTable
+from utils.table import PrettyTable
 import random
 import regex as re
 import copy
@@ -62,11 +61,15 @@ class ImageTextDataset(Dataset):
                  dataset,
                  transform=None,
                  text_length: int = 77,
-                 truncate: bool = True):
+                 truncate: bool = True,
+                 text_only: bool = False):
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
         self.truncate = truncate
+        self.text_only = text_only
+        from utils.simple_tokenizer import SimpleTokenizer
+
         self.tokenizer = SimpleTokenizer()
 
     def __len__(self):
@@ -74,18 +77,19 @@ class ImageTextDataset(Dataset):
 
     def __getitem__(self, index):
         pid, image_id, img_path, caption = self.dataset[index]
-        img = read_image(img_path)
-        if self.transform is not None:
-            img = self.transform(img)
-
         tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
 
         ret = {
+            'index': index,
             'pids': pid,
             'image_ids': image_id,
-            'images': img,
             'caption_ids': tokens,
         }
+        if not self.text_only:
+            img = read_image(img_path)
+            if self.transform is not None:
+                img = self.transform(img)
+            ret['images'] = img
 
         return ret
 
@@ -117,6 +121,8 @@ class TextDataset(Dataset):
         self.captions = captions
         self.text_length = text_length
         self.truncate = truncate
+        from utils.simple_tokenizer import SimpleTokenizer
+
         self.tokenizer = SimpleTokenizer()
 
     def __len__(self):
@@ -135,11 +141,15 @@ class ImageTextMLMDataset(Dataset):
                  dataset,
                  transform=None,
                  text_length: int = 77,
-                 truncate: bool = True):
+                 truncate: bool = True,
+                 text_only: bool = False):
         self.dataset = dataset
         self.transform = transform
         self.text_length = text_length
         self.truncate = truncate
+        self.text_only = text_only
+
+        from utils.simple_tokenizer import SimpleTokenizer
 
         self.tokenizer = SimpleTokenizer()
 
@@ -148,22 +158,24 @@ class ImageTextMLMDataset(Dataset):
 
     def __getitem__(self, index):
         pid, image_id, img_path, caption = self.dataset[index]
-        img = read_image(img_path)
-        if self.transform is not None:
-            img = self.transform(img)
         
         caption_tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
 
         mlm_tokens, mlm_labels = self._build_random_masked_tokens_and_labels(caption_tokens.cpu().numpy())
 
         ret = {
+            'index': index,
             'pids': pid,
             'image_ids': image_id,
-            'images': img,
             'caption_ids': caption_tokens,
             'mlm_ids': mlm_tokens,
             'mlm_labels': mlm_labels
         }
+        if not self.text_only:
+            img = read_image(img_path)
+            if self.transform is not None:
+                img = self.transform(img)
+            ret['images'] = img
 
         return ret
 

@@ -14,7 +14,9 @@ def build_optimizer(args, model):
         lr = args.lr
         weight_decay = args.weight_decay
 
-        if "cross" in key:
+        if "target_enricher" in key:
+            lr = args.lr * args.lr_factor
+        elif "cross" in key:
             # use large learning rate for random initialized cross modal module
             lr =  args.lr * args.lr_factor # default 5.0
         if "bias" in key:
@@ -24,6 +26,9 @@ def build_optimizer(args, model):
             lr = args.lr * args.lr_factor
         
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]
+
+    if len(params) == 0:
+        raise ValueError("No trainable parameters found for optimizer")
 
     if args.optimizer == "SGD":
         optimizer = torch.optim.SGD(
