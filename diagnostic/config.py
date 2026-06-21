@@ -142,7 +142,7 @@ def load_yaml_config(path: str) -> dict[str, Any]:
     import yaml
 
     with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+        data = yaml.load(handle, Loader=yaml.FullLoader) or {}
     if not isinstance(data, dict):
         raise ValueError(f"Retriever config must contain a mapping: {path}")
     return data
@@ -258,6 +258,20 @@ def json_safe(value: Any) -> Any:
 def config_payload(args: argparse.Namespace, irra_args: SimpleNamespace | None, resolved_device: str) -> dict[str, Any]:
     return {
         "bootstrap_unit": args.bootstrap_unit,
+        "diagnostic_config_policy": {
+            "source_config": args.retriever_config,
+            "read_model_and_eval_options_from_config": True,
+            "cli_overrides": {
+                "dataset_name": args.dataset,
+                "training": False,
+                "val_dataset": args.split,
+                "output_dir": "directory of --retriever_checkpoint",
+                "root_dir": args.root_dir if args.root_dir is not None else "config value",
+                "test_batch_size": args.test_batch_size if args.test_batch_size is not None else "config value",
+                "num_workers": args.num_workers if args.num_workers is not None else "config value",
+            },
+            "ignored_for_diagnostic_identity": ["name", "dataset_name", "output_dir"],
+        },
         "diagnostic_args": json_safe(vars(args)),
         "irra_config": json_safe(vars(irra_args)) if irra_args is not None else {},
         "resolved_device": resolved_device,

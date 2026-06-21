@@ -1,78 +1,53 @@
-# Draft IRRA config equivalent to running run_irra.sh.
-# The training loop evaluates every epoch on val_dataset and saves best.pth
-# when the official text-to-image R@1 improves.
-
-# general settings
-local_rank: 0
-name: irra
-output_dir: logs
-log_period: 100
-eval_period: 1
-val_dataset: test
-resume: false
-resume_ckpt_file: ""
-training: false
-distributed: false
-
-# model settings
-pretrain_choice: ViT-B/16
-temperature: 0.02
-img_aug: true
+MLM: true
+alpha: 0.9
+batch_size: 64
+beta: 0.999
+bias_lr_factor: 2.0
 cmt_depth: 4
+dataset_name: ICFG-PEDES
+distributed: false
+eval_period: 1
+gamma: 0.1
+id_loss_weight: 1.0
+img_aug: true
+img_size: !!python/tuple
+- 384
+- 128
+local_rank: 0
+log_period: 100
+loss_names: sdm+id+mlm
+lr: 1.0e-05
+lr_factor: 5.0
+lrscheduler: cosine
 masked_token_rate: 0.8
 masked_token_unchanged_rate: 0.1
-lr_factor: 5.0
-MLM: true
-
-# losses
-loss_names: sdm+mlm+id
+milestones: !!python/tuple
+- 20
+- 50
 mlm_loss_weight: 1.0
-id_loss_weight: 1.0
-
-# vision transformer
-img_size:
-  - 384
-  - 128
-stride_size: 16
-
-# text transformer
-text_length: 77
-vocab_size: 49408
-
-# optimizer
-optimizer: Adam
-lr: 0.00001
-bias_lr_factor: 2.0
 momentum: 0.9
-weight_decay: 0.00004
-weight_decay_bias: 0.0
-alpha: 0.9
-beta: 0.999
-
-# scheduler
+name: irra_icfg
 num_epoch: 60
-milestones:
-  - 20
-  - 50
-gamma: 0.1
-warmup_factor: 0.1
-warmup_epochs: 5
-warmup_method: linear
-lrscheduler: cosine
-target_lr: 0
-power: 0.9
-
-# dataset
-dataset_name: CUHK-PEDES
-sampler: random
 num_instance: 4
-root_dir: ./data
-batch_size: 64
-test_batch_size: 512
 num_workers: 8
-
-# metric/checkpoint notes for downstream tooling
-best_metric: R1
-best_metric_task: t2i
-best_metric_mode: max
-best_checkpoint_name: best.pth
+optimizer: Adam
+output_dir: logs/ICFG-PEDES/irra_icfg
+power: 0.9
+pretrain_choice: ViT-B/16
+resume: false
+resume_ckpt_file: ''
+root_dir: ./data
+sampler: random
+stride_size: 16
+target_lr: 0
+temperature: 0.02
+test_batch_size: 512
+text_length: 77
+training: true
+val_dataset: test
+vocab_size: 49408
+warmup_epochs: 5
+warmup_factor: 0.1
+warmup_method: linear
+weight_decay: 4.0e-05
+weight_decay_bias: 0.0

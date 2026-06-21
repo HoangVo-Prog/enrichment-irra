@@ -413,6 +413,15 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Resolved device: %s", resolved_device)
 
     irra_args = load_irra_config(args)
+    logger.info(
+        "Loaded IRRA config from %s; using model/eval options from config with diagnostic overrides: "
+        "dataset_name=%s, training=False, val_dataset=%s, output_dir=%s. "
+        "Config name/dataset_name/output_dir are treated as run metadata and may differ by dataset.",
+        args.retriever_config,
+        irra_args.dataset_name,
+        irra_args.val_dataset,
+        irra_args.output_dir,
+    )
     write_json(output_path(args.output_dir, CONFIG_USED), config_payload(args, irra_args, resolved_device))
 
     tables = _empty_tables()
