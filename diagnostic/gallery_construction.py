@@ -42,6 +42,9 @@ def _sample_ranked(
         return []
     order = np.lexsort((candidates, -scores[candidates] if descending else scores[candidates]))
     ranked = candidates[order]
+    if pool_factor <= 1:
+        chosen = ranked[:k]
+        return [int(x) for x in chosen.tolist()]
     pool_size = min(ranked.size, max(k, k * pool_factor))
     pool = ranked[:pool_size].copy()
     gen = _rng(seed, *parts)
@@ -106,6 +109,7 @@ def construct_gallery_pair(
         trial_id,
         "a_dense",
         descending=True,
+        pool_factor=1,
     )
     b_dense = _sample_ranked(
         distractors,
@@ -117,6 +121,7 @@ def construct_gallery_pair(
         trial_id,
         "b_dense",
         descending=True,
+        pool_factor=1,
     )
     if len(a_dense) != dense_count:
         return None, "insufficient_a_dense"

@@ -56,9 +56,9 @@ OUTPUT_FILENAMES = {
 
 PROMPT_TEMPLATES = (
     "a photo of a pedestrian with {cue}",
-    "a cropped surveillance photo of a person with {cue}",
-    "a person wearing or carrying {cue}",
-    "a full body photo of a person with {cue}",
+    "a photo of a person wearing {cue}",
+    "a person with {cue}",
+    "a pedestrian showing {cue}",
 )
 
 CSV_SCHEMAS = {

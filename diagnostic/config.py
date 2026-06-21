@@ -101,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lambda_global", type=float, default=1.0)
     parser.add_argument("--lambda_contrast", type=float, default=0.8)
     parser.add_argument("--cue_threshold_quantile", type=float, default=0.75)
-    parser.add_argument("--tau_density", type=float, default=0.05)
+    parser.add_argument("--tau_density", type=float, default=0.02)
     parser.add_argument("--min_pair_cue_shift", type=float, default=0.0)
     parser.add_argument("--bootstrap_iters", type=int, default=1000)
     parser.add_argument("--bootstrap_seed", type=int, default=123)
