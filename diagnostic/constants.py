@@ -1,0 +1,316 @@
+"""Constants and stable output schemas for the cue-swap diagnostic."""
+
+DATASET_NAMES = ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid")
+RETRIEVER_NAMES = ("irra",)
+CUE_SCORER_NAMES = ("off_the_shelf_clip",)
+SPLIT_NAMES = ("test", "val")
+SCORE_MODES = ("auto", "global")
+NEUTRAL_STRATEGIES = ("low_affinity", "random")
+
+GALLERY_TYPE_CUE_A = "cue_a"
+GALLERY_TYPE_CUE_B = "cue_b"
+GALLERY_TYPE_HM_A = "hm_a"
+GALLERY_TYPE_HM_B = "hm_b"
+GALLERY_TYPES = (
+    GALLERY_TYPE_CUE_A,
+    GALLERY_TYPE_CUE_B,
+    GALLERY_TYPE_HM_A,
+    GALLERY_TYPE_HM_B,
+)
+
+CONFIG_USED = "config_used.json"
+WHOLE_TEST_METRICS = "whole_test_metrics.csv"
+CUE_THRESHOLDS = "cue_thresholds.csv"
+CUE_CASE_CANDIDATES = "cue_case_candidates.csv"
+CUE_CASE_CONSTRUCTIBILITY = "cue_case_constructibility.csv"
+SELECTED_QUERIES = "selected_queries.csv"
+VALIDITY_COUNTS = "validity_counts.csv"
+PER_GALLERY_RESULTS = "per_gallery_results.csv"
+PAIRED_CUE_SWAP_RESULTS = "paired_cue_swap_results.csv"
+PAIRED_HARDNESS_CONTROL_RESULTS = "paired_hardness_control_results.csv"
+PAIRED_DELTA_RESULTS = "paired_delta_results.csv"
+SUMMARY_OVERALL = "summary_overall.csv"
+SUMMARY_BY_CASE = "summary_by_case.csv"
+SUMMARY_WITH_CI = "summary_with_ci.csv"
+SKIPPED_QUERIES = "skipped_queries.jsonl"
+GALLERIES = "galleries.jsonl"
+
+OUTPUT_FILENAMES = {
+    "config_used": CONFIG_USED,
+    "whole_test_metrics": WHOLE_TEST_METRICS,
+    "cue_thresholds": CUE_THRESHOLDS,
+    "cue_case_candidates": CUE_CASE_CANDIDATES,
+    "cue_case_constructibility": CUE_CASE_CONSTRUCTIBILITY,
+    "selected_queries": SELECTED_QUERIES,
+    "validity_counts": VALIDITY_COUNTS,
+    "per_gallery_results": PER_GALLERY_RESULTS,
+    "paired_cue_swap_results": PAIRED_CUE_SWAP_RESULTS,
+    "paired_hardness_control_results": PAIRED_HARDNESS_CONTROL_RESULTS,
+    "paired_delta_results": PAIRED_DELTA_RESULTS,
+    "summary_overall": SUMMARY_OVERALL,
+    "summary_by_case": SUMMARY_BY_CASE,
+    "summary_with_ci": SUMMARY_WITH_CI,
+    "skipped_queries": SKIPPED_QUERIES,
+    "galleries": GALLERIES,
+}
+
+PROMPT_TEMPLATES = (
+    "a photo of a pedestrian with {cue}",
+    "a cropped surveillance photo of a person with {cue}",
+    "a person wearing or carrying {cue}",
+    "a full body photo of a person with {cue}",
+)
+
+CSV_SCHEMAS = {
+    WHOLE_TEST_METRICS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "score_mode",
+        "R1",
+        "R5",
+        "R10",
+        "mAP",
+        "num_queries",
+        "num_gallery",
+    ],
+    CUE_THRESHOLDS: [
+        "cue",
+        "threshold",
+        "quantile",
+        "mean",
+        "std",
+        "min",
+        "max",
+        "num_gallery",
+        "prompts_json",
+    ],
+    CUE_CASE_CANDIDATES: [
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "source",
+        "num_queries",
+        "query_regex",
+    ],
+    CUE_CASE_CONSTRUCTIBILITY: [
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "num_queries",
+        "num_selected_queries",
+        "num_gallery",
+        "min_positive_candidates",
+        "min_a_dense_candidates",
+        "min_b_dense_candidates",
+        "min_neutral_candidates",
+        "constructible",
+        "reason",
+    ],
+    SELECTED_QUERIES: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "query_id",
+        "pid",
+        "text",
+        "num_positives",
+        "num_distractors",
+    ],
+    VALIDITY_COUNTS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "case_id",
+        "query_id",
+        "trial_id",
+        "attempted",
+        "valid",
+        "skip_reason",
+        "candidate_cue_shift",
+        "cue_shift",
+    ],
+    PER_GALLERY_RESULTS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "cue_scorer",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "query_id",
+        "pid",
+        "trial_id",
+        "gallery_type",
+        "num_gallery",
+        "num_positives",
+        "num_distractors",
+        "R1",
+        "R5",
+        "R10",
+        "AP",
+        "best_positive_rank",
+        "positive_ratio",
+        "cue_density_a",
+        "cue_density_b",
+        "cue_shift",
+        "ref_best_positive_rank",
+        "score_mode",
+    ],
+    PAIRED_CUE_SWAP_RESULTS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "cue_scorer",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "query_id",
+        "pid",
+        "trial_id",
+        "gallery_size",
+        "cue_shift",
+        "a_R1",
+        "b_R1",
+        "r1_flip",
+        "a_best_positive_rank",
+        "b_best_positive_rank",
+        "rank_shift",
+        "a_AP",
+        "b_AP",
+        "ap_delta",
+    ],
+    PAIRED_HARDNESS_CONTROL_RESULTS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "cue_scorer",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "query_id",
+        "pid",
+        "trial_id",
+        "gallery_size",
+        "hm_a_R1",
+        "hm_b_R1",
+        "hm_r1_flip",
+        "hm_a_best_positive_rank",
+        "hm_b_best_positive_rank",
+        "hm_rank_shift",
+        "hm_a_AP",
+        "hm_b_AP",
+        "hm_ap_delta",
+        "hm_a_mean_score_cue_subset",
+        "hm_a_mean_score_control_subset",
+        "hm_a_std_score_cue_subset",
+        "hm_a_std_score_control_subset",
+        "hm_b_mean_score_cue_subset",
+        "hm_b_mean_score_control_subset",
+        "hm_b_std_score_cue_subset",
+        "hm_b_std_score_control_subset",
+    ],
+    PAIRED_DELTA_RESULTS: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "cue_scorer",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "query_id",
+        "pid",
+        "trial_id",
+        "r1_flip",
+        "hm_r1_flip",
+        "delta_r1_flip",
+        "rank_shift",
+        "hm_rank_shift",
+        "delta_rank_shift",
+        "ap_delta",
+        "hm_ap_delta",
+        "delta_ap_delta",
+        "cue_shift",
+    ],
+    SUMMARY_OVERALL: [
+        "dataset",
+        "retriever_name",
+        "cue_scorer",
+        "ref_R1",
+        "num_cases",
+        "num_queries",
+        "num_pairs",
+        "valid_pair_rate",
+        "mean_cue_shift",
+        "r1_flip",
+        "rank_shift",
+        "hm_r1_flip",
+        "hm_rank_shift",
+        "delta_r1_flip",
+        "delta_rank_shift",
+    ],
+    SUMMARY_BY_CASE: [
+        "dataset",
+        "retriever_name",
+        "cue_scorer",
+        "case_id",
+        "cue_a",
+        "cue_b",
+        "num_queries",
+        "num_pairs",
+        "valid_pair_rate",
+        "mean_cue_shift",
+        "r1_flip",
+        "rank_shift",
+        "hm_r1_flip",
+        "hm_rank_shift",
+        "delta_r1_flip",
+        "delta_rank_shift",
+    ],
+    SUMMARY_WITH_CI: [
+        "metric",
+        "mean",
+        "ci_low",
+        "ci_high",
+        "bootstrap_iters",
+        "cluster_count",
+        "trial_count",
+    ],
+}
+
+JSONL_SCHEMAS = {
+    SKIPPED_QUERIES: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "case_id",
+        "query_id",
+        "trial_id",
+        "reason",
+        "details",
+    ],
+    GALLERIES: [
+        "dataset",
+        "split",
+        "retriever_name",
+        "case_id",
+        "query_id",
+        "trial_id",
+        "gallery_type",
+        "image_ids",
+        "image_paths",
+    ],
+}
+
+BOOTSTRAP_METRICS = (
+    "r1_flip",
+    "rank_shift",
+    "hm_r1_flip",
+    "hm_rank_shift",
+    "delta_r1_flip",
+    "delta_rank_shift",
+    "cue_shift",
+)
