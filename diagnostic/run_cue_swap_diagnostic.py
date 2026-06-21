@@ -47,8 +47,8 @@ from diagnostic.scoring import precompute_score_cache, resolve_score_mode, score
 def setup_logging() -> logging.Logger:
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        force=True,
     )
     return logging.getLogger("diagnostic.run")
 
@@ -60,6 +60,66 @@ def _empty_tables() -> dict[str, list[dict]]:
 def _mean(rows: list[dict], key: str) -> float:
     values = [float(row.get(key, 0.0) or 0.0) for row in rows]
     return float(np.mean(values)) if values else 0.0
+
+
+def _format_table(rows: list[dict], columns: list[str]) -> str:
+    def format_value(value):
+        if value is None:
+            return ""
+        if isinstance(value, (np.integer, int)):
+            return str(int(value))
+        if isinstance(value, (np.floating, float)):
+            value = float(value)
+            if not np.isfinite(value):
+                return str(value)
+            return f"{value:.6f}".rstrip("0").rstrip(".")
+        return str(value)
+
+    rendered_rows = [[format_value(row.get(column, "")) for column in columns] for row in rows]
+    widths = [
+        max(len(column), *(len(row[index]) for row in rendered_rows)) if rendered_rows else len(column)
+        for index, column in enumerate(columns)
+    ]
+    lines = [" ".join(column.rjust(widths[index]) for index, column in enumerate(columns))]
+    lines.extend(" ".join(value.rjust(widths[index]) for index, value in enumerate(row)) for row in rendered_rows)
+    return "\n".join(lines)
+
+
+def _log_final_report(logger: logging.Logger, output_dir: str, summary_rows: list[dict], ci_rows: list[dict]) -> None:
+    summary_columns = [
+        "dataset",
+        "retriever_name",
+        "cue_scorer",
+        "ref_R1",
+        "num_cases",
+        "num_queries",
+        "num_pairs",
+        "valid_pair_rate",
+        "mean_cue_shift",
+        "r1_flip",
+        "rank_shift",
+        "hm_r1_flip",
+        "hm_rank_shift",
+        "delta_r1_flip",
+        "delta_rank_shift",
+    ]
+    ci_columns = [
+        "metric",
+        "mean",
+        "ci_low",
+        "ci_high",
+        "bootstrap_iters",
+        "cluster_count",
+        "trial_count",
+    ]
+    print(
+        "Summary overall:\n"
+        f"{_format_table(summary_rows, summary_columns)}\n\n"
+        "Bootstrap CIs:\n"
+        f"{_format_table(ci_rows, ci_columns)}",
+        flush=True,
+    )
+    logger.info("Wrote diagnostic outputs to %s", output_dir)
 
 
 def _selected_query_rows(args, cases, selected_by_case, split_data):
@@ -337,6 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         row_counts = write_all_outputs(args.output_dir, tables)
         logger.info("Dry run complete. Output row counts: %s", row_counts)
+        logger.info("Wrote diagnostic outputs to %s", args.output_dir)
         return 0
 
     score_mode = resolve_score_mode(args.score_mode)
@@ -730,6 +791,7 @@ def main(argv: list[str] | None = None) -> int:
 
     row_counts = write_all_outputs(args.output_dir, tables)
     logger.info("Output row counts: %s", row_counts)
+    _log_final_report(logger, args.output_dir, tables["summary_overall"], tables["summary_with_ci"])
     valid_rate = valid_pairs / attempted_pairs if attempted_pairs else 0.0
     mean_shift = float(np.mean(valid_shifts)) if valid_shifts else 0.0
     audit_outputs(logger, row_counts, valid_rate, mean_shift, args.min_pair_cue_shift)
