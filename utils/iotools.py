@@ -1,4 +1,4 @@
-# encoding: utf-8
+﻿# encoding: utf-8
 """
 @author:  sherlock
 @contact: sherlockliao01@gmail.com
@@ -73,4 +73,13 @@ def save_train_configs(path, args):
 def load_train_configs(path):
     with open(path, 'r') as f:
         args = yaml.load(f, Loader=yaml.FullLoader)
+    removed_target_options = {
+        "use_shared_k", "pool_k", "pool_k_mode", "pool_k_candidates", "pool_coverage_epochs",
+        "pool_clusters", "positive_ratio_max", "eta", "pool_dist_metric", "pool_dist_threshold",
+        "epsilon", "use_target_retrieval_loss", "use_target_robust_loss", "hard_neg_k",
+        "robust_hard_k", "lambda_rob", "lambda_gain", "gain_margin",
+    }
+    removed = sorted(removed_target_options.intersection(args.keys()))
+    if removed:
+        raise ValueError("removed target-enrichment options are not supported: " + ", ".join(removed))
     return edict(args)

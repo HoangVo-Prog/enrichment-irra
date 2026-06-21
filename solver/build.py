@@ -1,4 +1,4 @@
-import torch
+﻿import torch
 
 from .lr_scheduler import LRSchedulerWithWarmup
 
@@ -14,6 +14,8 @@ def build_optimizer(args, model):
         lr = args.lr
         weight_decay = args.weight_decay
 
+        if "target_enricher" in key:
+            lr = args.lr * args.lr_factor
         if "cross" in key:
             # use large learning rate for random initialized cross modal module
             lr =  args.lr * args.lr_factor # default 5.0
@@ -21,6 +23,8 @@ def build_optimizer(args, model):
             lr = args.lr * args.bias_lr_factor
             weight_decay = args.weight_decay_bias
         if "classifier" in key or "mlm_head" in key:
+            lr = args.lr * args.lr_factor
+        if "target_enricher" in key:
             lr = args.lr * args.lr_factor
         
         params += [{"params": [value], "lr": lr, "weight_decay": weight_decay}]

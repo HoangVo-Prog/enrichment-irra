@@ -1,17 +1,39 @@
-import logging
+﻿import logging
 import time
 import torch
 from utils.meter import AverageMeter
 from utils.metrics import Evaluator
 from utils.comm import get_rank, synchronize
 from torch.utils.tensorboard import SummaryWriter
-from prettytable import PrettyTable
+from datasets.target_pool import TargetPoolManager
 
 
 def meter_scalar(value):
     if torch.is_tensor(value):
         return value.detach().item()
     return value
+
+
+def _should_meter(key, value):
+    if key.startswith("_") or not (torch.is_tensor(value) or isinstance(value, (float, int))):
+        return False
+    return (
+        key in {"loss", "img_acc", "txt_acc", "mlm_acc", "temperature"}
+        or "loss" in key
+        or key.startswith("pool_")
+        or key.startswith("target_")
+        or key.startswith("mixer/")
+    )
+
+
+def _move_batch(batch, device, skip_images=False):
+    moved = {}
+    for key, value in batch.items():
+        if skip_images and key == "images":
+            moved[key] = value
+        else:
+            moved[key] = value.to(device) if torch.is_tensor(value) else value
+    return moved
 
 
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
@@ -24,26 +46,20 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     arguments = {}
     arguments["num_epoch"] = num_epoch
     arguments["iteration"] = 0
+    arguments["epoch"] = start_epoch
 
     logger = logging.getLogger("IRRA.train")
     logger.info('start training')
 
-    meters = {
-        "loss": AverageMeter(),
-        "sdm_loss": AverageMeter(),
-        "itc_loss": AverageMeter(),
-        "id_loss": AverageMeter(),
-        "mlm_loss": AverageMeter(),
-        "img_acc": AverageMeter(),
-        "txt_acc": AverageMeter(),
-        "mlm_acc": AverageMeter()
-    }
-
+    meters = {name: AverageMeter() for name in [
+        "loss", "sdm_loss", "itc_loss", "id_loss", "mlm_loss", "target_enrichment_loss",
+        "target_retrieval_loss", "img_acc", "txt_acc", "mlm_acc"
+    ]}
     tb_writer = SummaryWriter(log_dir=args.output_dir)
 
+    target_pool = TargetPoolManager(train_loader.dataset, args, logger) if bool(getattr(args, "target_enrichment", False)) else None
     best_top1 = 0.0
 
-    # train
     for epoch in range(start_epoch, num_epoch + 1):
         start_time = time.time()
         for meter in meters.values():
@@ -51,42 +67,47 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
         model.train()
 
         for n_iter, batch in enumerate(train_loader):
-            batch = {k: v.to(device) for k, v in batch.items()}
+            global_step = arguments["iteration"] + 1
+            use_target = target_pool is not None and epoch >= int(getattr(args, "enrichment_start", 1))
+            skip_images = bool(getattr(args, "pnp_text_only", False)) and use_target
+            batch = _move_batch(batch, device, skip_images=skip_images)
 
-            ret = model(batch)
-            total_loss = sum([v for k, v in ret.items() if "loss" in k])
+            target_cache = None
+            if use_target:
+                target_cache = target_pool.get_train_cache(model, batch, epoch, global_step)
 
-            batch_size = batch['images'].shape[0]
-            meters['loss'].update(meter_scalar(total_loss), batch_size)
-            meters['sdm_loss'].update(meter_scalar(ret.get('sdm_loss', 0)), batch_size)
-            meters['itc_loss'].update(meter_scalar(ret.get('itc_loss', 0)), batch_size)
-            meters['id_loss'].update(meter_scalar(ret.get('id_loss', 0)), batch_size)
-            meters['mlm_loss'].update(meter_scalar(ret.get('mlm_loss', 0)), batch_size)
+            ret = model(batch, epoch=epoch, current_step=global_step, target_cache=target_cache)
+            if target_cache is not None and "diagnostics" in target_cache:
+                ret.update(target_cache["diagnostics"])
+            total_loss = ret["loss"] if "loss" in ret else sum([v for k, v in ret.items() if "loss" in k])
 
-            meters['img_acc'].update(meter_scalar(ret.get('img_acc', 0)), batch_size)
-            meters['txt_acc'].update(meter_scalar(ret.get('txt_acc', 0)), batch_size)
-            meters['mlm_acc'].update(meter_scalar(ret.get('mlm_acc', 0)), 1)
+            batch_size = batch['caption_ids'].shape[0]
+            for key, value in ret.items():
+                if _should_meter(key, value):
+                    if key not in meters:
+                        meters[key] = AverageMeter()
+                    meters[key].update(meter_scalar(value), batch_size)
 
             optimizer.zero_grad()
             total_loss.backward()
             optimizer.step()
             synchronize()
+            arguments["iteration"] = global_step
 
             if (n_iter + 1) % log_period == 0:
                 info_str = f"Epoch[{epoch}] Iteration[{n_iter + 1}/{len(train_loader)}]"
-                # log loss and acc info
-                for k, v in meters.items():
-                    if v.avg > 0:
-                        info_str += f", {k}: {v.avg:.4f}"
+                for key, meter in meters.items():
+                    if meter.avg > 0:
+                        info_str += f", {key}: {meter.avg:.4f}"
                 info_str += f", Base Lr: {scheduler.get_lr()[0]:.2e}"
                 logger.info(info_str)
-        
-        tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
-        tb_writer.add_scalar('temperature', meter_scalar(ret['temperature']), epoch)
-        for k, v in meters.items():
-            if v.avg > 0:
-                tb_writer.add_scalar(k, v.avg, epoch)
 
+        tb_writer.add_scalar('lr', scheduler.get_lr()[0], epoch)
+        if 'temperature' in ret:
+            tb_writer.add_scalar('temperature', meter_scalar(ret['temperature']), epoch)
+        for key, meter in meters.items():
+            if meter.avg > 0:
+                tb_writer.add_scalar(key, meter.avg, epoch)
 
         scheduler.step()
         if get_rank() == 0:

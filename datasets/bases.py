@@ -1,4 +1,4 @@
-from typing import List
+﻿from typing import List
 from torch.utils.data import Dataset
 import os.path as osp
 import logging
@@ -85,6 +85,7 @@ class ImageTextDataset(Dataset):
             'image_ids': image_id,
             'images': img,
             'caption_ids': tokens,
+            'index': index,
         }
 
         return ret
@@ -161,6 +162,7 @@ class ImageTextMLMDataset(Dataset):
             'image_ids': image_id,
             'images': img,
             'caption_ids': caption_tokens,
+            'index': index,
             'mlm_ids': mlm_tokens,
             'mlm_labels': mlm_labels
         }
