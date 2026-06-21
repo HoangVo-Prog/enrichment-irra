@@ -13,6 +13,9 @@ if __package__ is None or __package__ == "":
 from diagnostic.constants import (
     SUMMARY_BY_CASE,
     SUMMARY_OVERALL,
+    SUMMARY_WITH_CI,
+    SUMMARY_WITH_CI_CASE_QUERY,
+    SUMMARY_WITH_CI_UNIQUE_QUERY,
     VALIDITY_COUNTS,
 )
 
@@ -51,6 +54,7 @@ def main(argv: list[str] | None = None) -> int:
     generalized = []
     hardness = []
     validity = []
+    bootstrap_ci = []
     for run_dir in args.input_dirs:
         run_name = os.path.basename(os.path.abspath(run_dir))
         for row in _read_csv(os.path.join(run_dir, SUMMARY_OVERALL)):
@@ -77,10 +81,20 @@ def main(argv: list[str] | None = None) -> int:
             generalized.append({"run_dir": run_dir, "run_name": run_name, **row})
         for row in _read_csv(os.path.join(run_dir, VALIDITY_COUNTS)):
             validity.append({"run_dir": run_dir, "run_name": run_name, **row})
+        seen_ci_units = set()
+        for filename in (SUMMARY_WITH_CI_UNIQUE_QUERY, SUMMARY_WITH_CI_CASE_QUERY, SUMMARY_WITH_CI):
+            for row in _read_csv(os.path.join(run_dir, filename)):
+                unit = row.get("bootstrap_unit", "")
+                if filename == SUMMARY_WITH_CI and unit in seen_ci_units:
+                    continue
+                if filename != SUMMARY_WITH_CI and unit:
+                    seen_ci_units.add(unit)
+                bootstrap_ci.append({"run_dir": run_dir, "run_name": run_name, "source_file": filename, **row})
 
     _write_csv(os.path.join(args.output_dir, "generalized_cue_swap_table.csv"), generalized)
     _write_csv(os.path.join(args.output_dir, "hardness_control_table.csv"), hardness)
     _write_csv(os.path.join(args.output_dir, "validity_counts_table.csv"), validity)
+    _write_csv(os.path.join(args.output_dir, "bootstrap_ci_table.csv"), bootstrap_ci)
     return 0
 
 

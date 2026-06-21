@@ -14,7 +14,12 @@ if __package__ is None or __package__ == "":
 import numpy as np
 
 from diagnostic.audit import audit_outputs
-from diagnostic.bootstrap import cluster_bootstrap
+from diagnostic.bootstrap import (
+    bootstrap_count_stats,
+    bootstrap_unit_label,
+    cluster_bootstrap_by_unit,
+    cluster_columns_for_unit,
+)
 from diagnostic.clip_cue_scorer import OffTheShelfCLIPCueScorer, threshold_rows
 from diagnostic.config import (
     build_parser,
@@ -25,12 +30,16 @@ from diagnostic.config import (
     validate_args,
 )
 from diagnostic.constants import (
+    BOOTSTRAP_UNIT_CASE_QUERY,
+    BOOTSTRAP_UNIT_UNIQUE_QUERY,
     CONFIG_USED,
     GALLERY_TYPE_CUE_A,
     GALLERY_TYPE_CUE_B,
     GALLERY_TYPE_HM_A,
     GALLERY_TYPE_HM_B,
     OUTPUT_FILENAMES,
+    SUMMARY_WITH_CI_CASE_QUERY,
+    SUMMARY_WITH_CI_UNIQUE_QUERY,
 )
 from diagnostic.controls import construct_hardness_controls
 from diagnostic.cue_cases import build_cases, select_queries_for_cases
@@ -39,7 +48,7 @@ from diagnostic.data_loading import empty_split, load_split
 from diagnostic.embeddings import extract_retrieval_embeddings
 from diagnostic.gallery_construction import construct_gallery_pair, constructibility_rows
 from diagnostic.metrics import cue_density, cue_shift, paired_retrieval_metrics, positive_ratio, retrieval_metrics
-from diagnostic.outputs import ensure_output_dir, output_path, write_all_outputs, write_json
+from diagnostic.outputs import ensure_output_dir, output_path, write_all_outputs, write_csv_rows, write_json
 from diagnostic.retriever_loading import load_retriever
 from diagnostic.scoring import precompute_score_cache, resolve_score_mode, score_gallery, whole_test_metrics
 
@@ -109,7 +118,10 @@ def _log_final_report(logger: logging.Logger, output_dir: str, summary_rows: lis
         "ci_low",
         "ci_high",
         "bootstrap_iters",
+        "bootstrap_unit",
         "cluster_count",
+        "unique_query_count",
+        "case_query_count",
         "trial_count",
     ]
     print(
@@ -336,6 +348,58 @@ def _candidate_stats(values: list[float]) -> str:
     return f"min={arr.min():.4f}, mean={arr.mean():.4f}, max={arr.max():.4f}"
 
 
+def _requested_bootstrap_units(bootstrap_unit: str) -> list[str]:
+    if bootstrap_unit == "both":
+        return [BOOTSTRAP_UNIT_UNIQUE_QUERY, BOOTSTRAP_UNIT_CASE_QUERY]
+    return [bootstrap_unit]
+
+
+def _primary_bootstrap_unit(bootstrap_unit: str) -> str:
+    if bootstrap_unit == "both":
+        return BOOTSTRAP_UNIT_UNIQUE_QUERY
+    return bootstrap_unit
+
+
+def _bootstrap_filename(unit: str) -> str:
+    if unit == BOOTSTRAP_UNIT_UNIQUE_QUERY:
+        return SUMMARY_WITH_CI_UNIQUE_QUERY
+    if unit == BOOTSTRAP_UNIT_CASE_QUERY:
+        return SUMMARY_WITH_CI_CASE_QUERY
+    raise ValueError(f"Unsupported bootstrap unit: {unit}")
+
+
+def _run_bootstraps(rows, args, logger):
+    results: dict[str, list[dict]] = {}
+    for unit in _requested_bootstrap_units(args.bootstrap_unit):
+        cluster_columns = cluster_columns_for_unit(unit)
+        stats = bootstrap_count_stats(rows, cluster_columns)
+        logger.info(
+            "Starting %s:\n"
+            "unique_query_count=%d\n"
+            "case_query_count=%d\n"
+            "cluster_count=%d\n"
+            "trial_count=%d\n"
+            "bootstrap_iters=%d\n"
+            "bootstrap_seed=%d",
+            bootstrap_unit_label(unit),
+            stats["unique_query_count"],
+            stats["case_query_count"],
+            stats["cluster_count"],
+            stats["trial_count"],
+            args.bootstrap_iters,
+            args.bootstrap_seed,
+        )
+        boot_start = time.time()
+        results[unit] = cluster_bootstrap_by_unit(
+            rows,
+            iters=args.bootstrap_iters,
+            seed=args.bootstrap_seed,
+            bootstrap_unit=unit,
+        )
+        logger.info("Completed %s: elapsed=%.1fs", bootstrap_unit_label(unit), time.time() - boot_start)
+    return results
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -395,7 +459,13 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Selected query rows: %d", len(tables["selected_queries"]))
 
     if args.dry_run:
+        bootstrap_results = _run_bootstraps(tables["paired_delta_results"], args, logger)
+        primary_unit = _primary_bootstrap_unit(args.bootstrap_unit)
+        tables["summary_with_ci"] = bootstrap_results[primary_unit]
         row_counts = write_all_outputs(args.output_dir, tables)
+        for unit, rows in bootstrap_results.items():
+            filename = _bootstrap_filename(unit)
+            row_counts[filename] = write_csv_rows(args.output_dir, filename, rows)
         logger.info("Dry run complete. Output row counts: %s", row_counts)
         logger.info("Wrote diagnostic outputs to %s", args.output_dir)
         return 0
@@ -770,14 +840,9 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("Final candidate Cue Shift stats: %s", _candidate_stats(candidate_shifts))
     logger.info("Final valid Cue Shift stats: %s", _candidate_stats(valid_shifts))
 
-    logger.info("Bootstrap start: iters=%d", args.bootstrap_iters)
-    boot_start = time.time()
-    tables["summary_with_ci"] = cluster_bootstrap(
-        tables["paired_delta_results"],
-        iters=args.bootstrap_iters,
-        seed=args.bootstrap_seed,
-    )
-    logger.info("Bootstrap end: elapsed=%.1fs", time.time() - boot_start)
+    bootstrap_results = _run_bootstraps(tables["paired_delta_results"], args, logger)
+    primary_unit = _primary_bootstrap_unit(args.bootstrap_unit)
+    tables["summary_with_ci"] = bootstrap_results[primary_unit]
 
     tables["summary_overall"], tables["summary_by_case"] = _summary_rows(
         args,
@@ -790,6 +855,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     row_counts = write_all_outputs(args.output_dir, tables)
+    for unit, rows in bootstrap_results.items():
+        filename = _bootstrap_filename(unit)
+        row_counts[filename] = write_csv_rows(args.output_dir, filename, rows)
     logger.info("Output row counts: %s", row_counts)
     _log_final_report(logger, args.output_dir, tables["summary_overall"], tables["summary_with_ci"])
     valid_rate = valid_pairs / attempted_pairs if attempted_pairs else 0.0

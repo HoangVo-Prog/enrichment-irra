@@ -37,3 +37,41 @@ retrieval uses the single global branch exposed by `model.encode_text` and
 
 Generated files use stable schemas, including empty CSV headers when no valid
 rows exist. Cue Shift is computed over distractors only.
+
+## Bootstrap Units
+
+The diagnostic supports two cluster bootstrap units through:
+
+```bash
+--bootstrap_unit {case_query,unique_query,both}
+```
+
+`unique_query` is the recommended primary analysis.
+
+Case-query-instance bootstrap:
+Resamples each eligible `(case_id, query_id)` instance jointly with all of its
+repeated trials. The cluster key is:
+
+```text
+dataset, retriever_name, case_id, query_id
+```
+
+Unique-query bootstrap:
+Resamples each underlying `query_id` jointly with every associated cue case and
+all repeated trials. The cluster key is:
+
+```text
+dataset, retriever_name, query_id
+```
+
+The reported metrics remain micro-averaged over valid case-query trials. The
+unique-query bootstrap changes the uncertainty estimate, not the full-sample
+point-estimate weighting. It is not a query-macro average.
+
+The primary CI table is written to `summary_with_ci.csv`. Unit-specific tables
+are written as requested:
+
+```text
+summary_with_ci_unique_query.csv
+summary_with_ci_case_query.csv
+```

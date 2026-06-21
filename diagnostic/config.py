@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from diagnostic.constants import (
+    BOOTSTRAP_UNITS,
     CUE_SCORER_NAMES,
     DATASET_NAMES,
     NEUTRAL_STRATEGIES,
@@ -105,6 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min_pair_cue_shift", type=float, default=0.0)
     parser.add_argument("--bootstrap_iters", type=int, default=1000)
     parser.add_argument("--bootstrap_seed", type=int, default=123)
+    parser.add_argument("--bootstrap_unit", choices=BOOTSTRAP_UNITS, default="unique_query")
     parser.add_argument("--enable_random_control", action="store_true")
     parser.add_argument("--save_galleries", action="store_true")
     parser.add_argument("--save_image_paths", action="store_true")
@@ -255,6 +257,7 @@ def json_safe(value: Any) -> Any:
 
 def config_payload(args: argparse.Namespace, irra_args: SimpleNamespace | None, resolved_device: str) -> dict[str, Any]:
     return {
+        "bootstrap_unit": args.bootstrap_unit,
         "diagnostic_args": json_safe(vars(args)),
         "irra_config": json_safe(vars(irra_args)) if irra_args is not None else {},
         "resolved_device": resolved_device,

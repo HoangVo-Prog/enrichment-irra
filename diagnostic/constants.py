@@ -6,6 +6,9 @@ CUE_SCORER_NAMES = ("off_the_shelf_clip",)
 SPLIT_NAMES = ("test", "val")
 SCORE_MODES = ("auto", "global")
 NEUTRAL_STRATEGIES = ("low_affinity", "random")
+BOOTSTRAP_UNITS = ("case_query", "unique_query", "both")
+BOOTSTRAP_UNIT_CASE_QUERY = "case_query"
+BOOTSTRAP_UNIT_UNIQUE_QUERY = "unique_query"
 
 GALLERY_TYPE_CUE_A = "cue_a"
 GALLERY_TYPE_CUE_B = "cue_b"
@@ -32,6 +35,8 @@ PAIRED_DELTA_RESULTS = "paired_delta_results.csv"
 SUMMARY_OVERALL = "summary_overall.csv"
 SUMMARY_BY_CASE = "summary_by_case.csv"
 SUMMARY_WITH_CI = "summary_with_ci.csv"
+SUMMARY_WITH_CI_UNIQUE_QUERY = "summary_with_ci_unique_query.csv"
+SUMMARY_WITH_CI_CASE_QUERY = "summary_with_ci_case_query.csv"
 SKIPPED_QUERIES = "skipped_queries.jsonl"
 GALLERIES = "galleries.jsonl"
 
@@ -276,7 +281,34 @@ CSV_SCHEMAS = {
         "ci_low",
         "ci_high",
         "bootstrap_iters",
+        "bootstrap_unit",
         "cluster_count",
+        "unique_query_count",
+        "case_query_count",
+        "trial_count",
+    ],
+    SUMMARY_WITH_CI_UNIQUE_QUERY: [
+        "metric",
+        "mean",
+        "ci_low",
+        "ci_high",
+        "bootstrap_iters",
+        "bootstrap_unit",
+        "cluster_count",
+        "unique_query_count",
+        "case_query_count",
+        "trial_count",
+    ],
+    SUMMARY_WITH_CI_CASE_QUERY: [
+        "metric",
+        "mean",
+        "ci_low",
+        "ci_high",
+        "bootstrap_iters",
+        "bootstrap_unit",
+        "cluster_count",
+        "unique_query_count",
+        "case_query_count",
         "trial_count",
     ],
 }
@@ -313,4 +345,17 @@ BOOTSTRAP_METRICS = (
     "delta_r1_flip",
     "delta_rank_shift",
     "cue_shift",
+)
+
+CASE_QUERY_CLUSTER_COLS = (
+    "dataset",
+    "retriever_name",
+    "case_id",
+    "query_id",
+)
+
+UNIQUE_QUERY_CLUSTER_COLS = (
+    "dataset",
+    "retriever_name",
+    "query_id",
 )
