@@ -34,6 +34,13 @@ def _cue_pattern_text(cue: Cue) -> str:
     return rf"\b(?:{joined})\b"
 
 
+def _fallback_cue(name: str) -> Cue:
+    compact_space = re.escape(name).replace(r"\ ", r"\s+")
+    hyphen_as_space = re.escape(name.replace("-", " ")).replace(r"\ ", r"[\s-]+")
+    patterns = tuple(dict.fromkeys((compact_space, hyphen_as_space)))
+    return Cue(name=name, category="manual_case", patterns=patterns)
+
+
 def _strip_leading_anywhere(pattern: str) -> str:
     if pattern.startswith(".*?"):
         return pattern[3:]
@@ -165,6 +172,8 @@ def _matching_query_ids(
         return sorted(set(ids))
 
     regex_ids = index.match_query_regex(query_regex) if query_regex else valid_ids
+    if query_regex:
+        return sorted(regex_ids)
     cue_ids = index.match_any((_cue_pattern_text(cue_a), _cue_pattern_text(cue_b)))
     return sorted(regex_ids & cue_ids)
 
@@ -178,14 +187,35 @@ def load_manual_cases(
 ) -> list[CueCase]:
     cue_by_name = {cue.name: cue for cue in cues}
     rows = _load_json_or_jsonl(path)
+    unknown_cues = sorted(
+        {
+            str(row.get(field, ""))
+            for row in rows
+            for field in ("cue_a", "cue_b")
+            if str(row.get(field, "")) and str(row.get(field, "")) not in cue_by_name
+        }
+    )
+    if unknown_cues:
+        for cue_name in unknown_cues:
+            cue_by_name[cue_name] = _fallback_cue(cue_name)
+        if logger is not None:
+            shown = ", ".join(repr(cue) for cue in unknown_cues[:12])
+            hidden = len(unknown_cues) - min(len(unknown_cues), 12)
+            suffix = f", ... {hidden} more" if hidden else ""
+            logger.warning(
+                "Manual cases reference %d cues outside the loaded ontology; "
+                "using case query_regex/query_ids for selection where available and retaining cue names for CLIP scoring. "
+                "Examples: %s%s",
+                len(unknown_cues),
+                shown,
+                suffix,
+            )
     index = text_index or _QueryTextIndex(queries)
     cases: list[CueCase] = []
     start = time.time()
     for idx, row in enumerate(rows):
         cue_a_name = str(row["cue_a"])
         cue_b_name = str(row["cue_b"])
-        if cue_a_name not in cue_by_name or cue_b_name not in cue_by_name:
-            raise ValueError(f"Unknown cue in manual case {idx}: {cue_a_name!r}, {cue_b_name!r}")
         query_regex = str(row.get("query_regex", ""))
         query_ids = _matching_query_ids(
             queries,
