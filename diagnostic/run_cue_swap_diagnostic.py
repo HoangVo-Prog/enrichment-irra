@@ -448,12 +448,14 @@ def main(argv: list[str] | None = None) -> int:
         auto_cases=args.auto_cases,
         min_queries_per_auto_case=args.min_queries_per_auto_case,
         max_auto_cases=args.max_auto_cases,
+        logger=logger,
     )
     candidate_rows, selected_by_case = select_queries_for_cases(
         cases,
         split_data.query_records,
         args.max_queries_per_case,
         args.seed,
+        logger=logger,
     )
     tables["cue_case_candidates"] = candidate_rows
     tables["cue_case_constructibility"] = constructibility_rows(
