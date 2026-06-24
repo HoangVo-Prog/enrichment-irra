@@ -1,343 +1,168 @@
-"""Constants and stable output schemas for the cue-swap diagnostic."""
+"""Shared constants and stable output schemas for cue-swap diagnostics."""
 
 DATASET_NAMES = ("CUHK-PEDES", "ICFG-PEDES", "RSTPReid")
 RETRIEVER_NAMES = ("irra",)
-CUE_SCORER_NAMES = ("off_the_shelf_clip",)
+CUE_SCORERS = ("off_the_shelf_clip",)
+CUE_SCORER_NAMES = CUE_SCORERS
 SPLIT_NAMES = ("test", "val")
 SCORE_MODES = ("auto", "global")
 NEUTRAL_STRATEGIES = ("low_affinity", "random")
-BOOTSTRAP_UNITS = ("case_query", "unique_query", "both")
-BOOTSTRAP_UNIT_CASE_QUERY = "case_query"
-BOOTSTRAP_UNIT_UNIQUE_QUERY = "unique_query"
 
-GALLERY_TYPE_CUE_A = "cue_a"
-GALLERY_TYPE_CUE_B = "cue_b"
-GALLERY_TYPE_HM_A = "hm_a"
-GALLERY_TYPE_HM_B = "hm_b"
-GALLERY_TYPES = (
-    GALLERY_TYPE_CUE_A,
-    GALLERY_TYPE_CUE_B,
-    GALLERY_TYPE_HM_A,
-    GALLERY_TYPE_HM_B,
-)
+CUE_GALLERY_TYPES = ("a_dense", "b_dense")
+HM_GALLERY_TYPES = ("hm_a", "hm_b")
+ALL_GALLERY_TYPES = CUE_GALLERY_TYPES + HM_GALLERY_TYPES
 
-CONFIG_USED = "config_used.json"
-WHOLE_TEST_METRICS = "whole_test_metrics.csv"
-CUE_THRESHOLDS = "cue_thresholds.csv"
-CUE_CASE_CANDIDATES = "cue_case_candidates.csv"
-CUE_CASE_CONSTRUCTIBILITY = "cue_case_constructibility.csv"
-SELECTED_QUERIES = "selected_queries.csv"
-VALIDITY_COUNTS = "validity_counts.csv"
-PER_GALLERY_RESULTS = "per_gallery_results.csv"
-PAIRED_CUE_SWAP_RESULTS = "paired_cue_swap_results.csv"
-PAIRED_HARDNESS_CONTROL_RESULTS = "paired_hardness_control_results.csv"
-PAIRED_DELTA_RESULTS = "paired_delta_results.csv"
-SUMMARY_OVERALL = "summary_overall.csv"
-SUMMARY_BY_CASE = "summary_by_case.csv"
-SUMMARY_WITH_CI = "summary_with_ci.csv"
-SUMMARY_WITH_CI_UNIQUE_QUERY = "summary_with_ci_unique_query.csv"
-SUMMARY_WITH_CI_CASE_QUERY = "summary_with_ci_case_query.csv"
-SKIPPED_QUERIES = "skipped_queries.jsonl"
-GALLERIES = "galleries.jsonl"
-
-OUTPUT_FILENAMES = {
-    "config_used": CONFIG_USED,
-    "whole_test_metrics": WHOLE_TEST_METRICS,
-    "cue_thresholds": CUE_THRESHOLDS,
-    "cue_case_candidates": CUE_CASE_CANDIDATES,
-    "cue_case_constructibility": CUE_CASE_CONSTRUCTIBILITY,
-    "selected_queries": SELECTED_QUERIES,
-    "validity_counts": VALIDITY_COUNTS,
-    "per_gallery_results": PER_GALLERY_RESULTS,
-    "paired_cue_swap_results": PAIRED_CUE_SWAP_RESULTS,
-    "paired_hardness_control_results": PAIRED_HARDNESS_CONTROL_RESULTS,
-    "paired_delta_results": PAIRED_DELTA_RESULTS,
-    "summary_overall": SUMMARY_OVERALL,
-    "summary_by_case": SUMMARY_BY_CASE,
-    "summary_with_ci": SUMMARY_WITH_CI,
-    "skipped_queries": SKIPPED_QUERIES,
-    "galleries": GALLERIES,
-}
-
-PROMPT_TEMPLATES = (
+DEFAULT_PROMPT_TEMPLATES = (
     "a photo of a pedestrian with {cue}",
     "a photo of a person wearing {cue}",
     "a person with {cue}",
     "a pedestrian showing {cue}",
 )
 
-CSV_SCHEMAS = {
-    WHOLE_TEST_METRICS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "score_mode",
-        "R1",
-        "R5",
-        "R10",
-        "mAP",
-        "num_queries",
-        "num_gallery",
-    ],
-    CUE_THRESHOLDS: [
-        "cue",
-        "threshold",
-        "quantile",
-        "mean",
-        "std",
-        "min",
-        "max",
-        "num_gallery",
-        "prompts_json",
-    ],
-    CUE_CASE_CANDIDATES: [
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "source",
-        "num_queries",
-        "query_regex",
-    ],
-    CUE_CASE_CONSTRUCTIBILITY: [
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "num_queries",
-        "num_selected_queries",
-        "num_gallery",
-        "min_positive_candidates",
-        "min_a_dense_candidates",
-        "min_b_dense_candidates",
-        "min_neutral_candidates",
-        "constructible",
-        "reason",
-    ],
-    SELECTED_QUERIES: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "query_id",
-        "pid",
-        "text",
-        "num_positives",
-        "num_distractors",
-    ],
-    VALIDITY_COUNTS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "case_id",
-        "query_id",
-        "trial_id",
-        "attempted",
-        "valid",
-        "skip_reason",
-        "candidate_cue_shift",
-        "cue_shift",
-    ],
-    PER_GALLERY_RESULTS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "cue_scorer",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "query_id",
-        "pid",
-        "trial_id",
-        "gallery_type",
-        "num_gallery",
-        "num_positives",
-        "num_distractors",
-        "R1",
-        "R5",
-        "R10",
-        "AP",
-        "best_positive_rank",
-        "positive_ratio",
-        "cue_density_a",
-        "cue_density_b",
-        "cue_shift",
-        "ref_best_positive_rank",
-        "score_mode",
-    ],
-    PAIRED_CUE_SWAP_RESULTS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "cue_scorer",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "query_id",
-        "pid",
-        "trial_id",
-        "gallery_size",
-        "cue_shift",
-        "a_R1",
-        "b_R1",
-        "r1_flip",
-        "a_best_positive_rank",
-        "b_best_positive_rank",
-        "rank_shift",
-        "a_AP",
-        "b_AP",
-        "ap_delta",
-    ],
-    PAIRED_HARDNESS_CONTROL_RESULTS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "cue_scorer",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "query_id",
-        "pid",
-        "trial_id",
-        "gallery_size",
-        "hm_a_R1",
-        "hm_b_R1",
-        "hm_r1_flip",
-        "hm_a_best_positive_rank",
-        "hm_b_best_positive_rank",
-        "hm_rank_shift",
-        "hm_a_AP",
-        "hm_b_AP",
-        "hm_ap_delta",
-        "hm_a_mean_score_cue_subset",
-        "hm_a_mean_score_control_subset",
-        "hm_a_std_score_cue_subset",
-        "hm_a_std_score_control_subset",
-        "hm_b_mean_score_cue_subset",
-        "hm_b_mean_score_control_subset",
-        "hm_b_std_score_cue_subset",
-        "hm_b_std_score_control_subset",
-    ],
-    PAIRED_DELTA_RESULTS: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "cue_scorer",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "query_id",
-        "pid",
-        "trial_id",
-        "r1_flip",
-        "hm_r1_flip",
-        "delta_r1_flip",
-        "rank_shift",
-        "hm_rank_shift",
-        "delta_rank_shift",
-        "ap_delta",
-        "hm_ap_delta",
-        "delta_ap_delta",
-        "cue_shift",
-    ],
-    SUMMARY_OVERALL: [
-        "dataset",
-        "retriever_name",
-        "cue_scorer",
-        "ref_R1",
-        "num_cases",
-        "num_queries",
-        "num_pairs",
-        "valid_pair_rate",
-        "mean_cue_shift",
-        "r1_flip",
-        "rank_shift",
-        "hm_r1_flip",
-        "hm_rank_shift",
-        "delta_r1_flip",
-        "delta_rank_shift",
-    ],
-    SUMMARY_BY_CASE: [
-        "dataset",
-        "retriever_name",
-        "cue_scorer",
-        "case_id",
-        "cue_a",
-        "cue_b",
-        "num_queries",
-        "num_pairs",
-        "valid_pair_rate",
-        "mean_cue_shift",
-        "r1_flip",
-        "rank_shift",
-        "hm_r1_flip",
-        "hm_rank_shift",
-        "delta_r1_flip",
-        "delta_rank_shift",
-    ],
-    SUMMARY_WITH_CI: [
-        "metric",
-        "mean",
-        "ci_low",
-        "ci_high",
-        "bootstrap_iters",
-        "bootstrap_unit",
-        "cluster_count",
-        "unique_query_count",
-        "case_query_count",
-        "trial_count",
-    ],
-    SUMMARY_WITH_CI_UNIQUE_QUERY: [
-        "metric",
-        "mean",
-        "ci_low",
-        "ci_high",
-        "bootstrap_iters",
-        "bootstrap_unit",
-        "cluster_count",
-        "unique_query_count",
-        "case_query_count",
-        "trial_count",
-    ],
-    SUMMARY_WITH_CI_CASE_QUERY: [
-        "metric",
-        "mean",
-        "ci_low",
-        "ci_high",
-        "bootstrap_iters",
-        "bootstrap_unit",
-        "cluster_count",
-        "unique_query_count",
-        "case_query_count",
-        "trial_count",
-    ],
+OUTPUT_FILES = {
+    "config": "config_used.json",
+    "whole_test": "whole_test_metrics.csv",
+    "thresholds": "cue_thresholds.csv",
+    "case_candidates": "cue_case_candidates.csv",
+    "constructibility": "cue_case_constructibility.csv",
+    "selected_queries": "selected_queries.csv",
+    "validity_counts": "validity_counts.csv",
+    "per_gallery": "per_gallery_results.csv",
+    "paired_cue": "paired_cue_swap_results.csv",
+    "paired_hm": "paired_hardness_control_results.csv",
+    "paired_delta": "paired_delta_results.csv",
+    "summary_overall": "summary_overall.csv",
+    "summary_by_case": "summary_by_case.csv",
+    "summary_ci": "summary_with_ci.csv",
+    "summary_ci_unique_query": "summary_with_ci_unique_query.csv",
+    "summary_ci_case_query": "summary_with_ci_case_query.csv",
+    "skipped": "skipped_queries.jsonl",
+    "galleries": "galleries.jsonl",
 }
 
-JSONL_SCHEMAS = {
-    SKIPPED_QUERIES: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "case_id",
-        "query_id",
-        "trial_id",
-        "reason",
-        "details",
-    ],
-    GALLERIES: [
-        "dataset",
-        "split",
-        "retriever_name",
-        "case_id",
-        "query_id",
-        "trial_id",
-        "gallery_type",
-        "image_ids",
-        "image_paths",
-    ],
-}
+CASE_QUERY_CLUSTER_COLS = ["dataset", "retriever_name", "case_id", "query_id"]
+UNIQUE_QUERY_CLUSTER_COLS = ["dataset", "retriever_name", "query_id"]
+BOOTSTRAP_UNITS = ("case_query", "unique_query", "both")
+PRIMARY_BOOTSTRAP_UNIT_FOR_BOTH = "unique_query"
 
-BOOTSTRAP_METRICS = (
+SELECTED_QUERY_COLUMNS = [
+    "dataset",
+    "case_id",
+    "query_id",
+    "query_text",
+    "pid",
+    "cue_a",
+    "cue_b",
+    "selection_method",
+]
+
+PER_GALLERY_COLUMNS = [
+    "dataset",
+    "retriever_name",
+    "cue_scorer",
+    "case_id",
+    "query_id",
+    "query_text",
+    "pid",
+    "cue_a",
+    "cue_b",
+    "trial_id",
+    "construction_type",
+    "gallery_type",
+    "gallery_size",
+    "num_positives",
+    "num_distractors",
+    "positive_ratio",
+    "R1",
+    "R5",
+    "R10",
+    "AP",
+    "best_positive_rank",
+    "D_soft_a",
+    "D_soft_b",
+    "D_hard_a",
+    "D_hard_b",
+    "mean_retriever_score_distractors",
+    "score_mode",
+    "lambda_global",
+    "seed",
+]
+
+PAIRED_CUE_COLUMNS = [
+    "dataset",
+    "retriever_name",
+    "cue_scorer",
+    "case_id",
+    "query_id",
+    "pid",
+    "trial_id",
+    "cue_a",
+    "cue_b",
+    "r1_flip",
+    "rank_shift",
+    "ap_delta",
+    "cue_shift",
+    "D_soft_a_a_dense",
+    "D_soft_a_b_dense",
+    "D_soft_b_a_dense",
+    "D_soft_b_b_dense",
+    "score_mode",
+    "lambda_global",
+    "seed",
+]
+
+PAIRED_HM_COLUMNS = [
+    "dataset",
+    "retriever_name",
+    "cue_scorer",
+    "case_id",
+    "query_id",
+    "pid",
+    "trial_id",
+    "cue_a",
+    "cue_b",
+    "hm_r1_flip",
+    "hm_rank_shift",
+    "hm_ap_delta",
+    "hm_a_mean_score_cue_subset",
+    "hm_a_mean_score_control_subset",
+    "hm_a_std_score_cue_subset",
+    "hm_a_std_score_control_subset",
+    "hm_b_mean_score_cue_subset",
+    "hm_b_mean_score_control_subset",
+    "hm_b_std_score_cue_subset",
+    "hm_b_std_score_control_subset",
+    "score_mode",
+    "lambda_global",
+    "seed",
+]
+
+PAIRED_DELTA_COLUMNS = [
+    "dataset",
+    "retriever_name",
+    "cue_scorer",
+    "case_id",
+    "query_id",
+    "pid",
+    "trial_id",
+    "cue_a",
+    "cue_b",
+    "r1_flip",
+    "hm_r1_flip",
+    "delta_r1_flip",
+    "rank_shift",
+    "hm_rank_shift",
+    "delta_rank_shift",
+    "ap_delta",
+    "hm_ap_delta",
+    "delta_ap_delta",
+    "cue_shift",
+    "score_mode",
+    "lambda_global",
+    "seed",
+]
+
+SUMMARY_CI_METRICS = (
     "r1_flip",
     "rank_shift",
     "hm_r1_flip",
@@ -346,16 +171,17 @@ BOOTSTRAP_METRICS = (
     "delta_rank_shift",
     "cue_shift",
 )
+BOOTSTRAP_METRICS = SUMMARY_CI_METRICS
 
-CASE_QUERY_CLUSTER_COLS = (
-    "dataset",
-    "retriever_name",
-    "case_id",
-    "query_id",
-)
-
-UNIQUE_QUERY_CLUSTER_COLS = (
-    "dataset",
-    "retriever_name",
-    "query_id",
-)
+SUMMARY_CI_COLUMNS = [
+    "metric",
+    "mean",
+    "ci_low",
+    "ci_high",
+    "bootstrap_iters",
+    "bootstrap_unit",
+    "cluster_count",
+    "unique_query_count",
+    "case_query_count",
+    "trial_count",
+]

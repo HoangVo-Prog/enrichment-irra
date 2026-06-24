@@ -1,346 +1,310 @@
-"""Manual and automatic cue-case construction from query text."""
+"""Manual and automatic cue-case handling without retrieval-outcome filtering."""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import time
-from dataclasses import dataclass
-from typing import Iterable
+from itertools import combinations
+from pathlib import Path
+from typing import Any, Mapping, Sequence
 
-from diagnostic.config import stable_int_seed
-from diagnostic.cue_ontology import Cue
+import numpy as np
+
+from diagnostic.cue_ontology import CueSpec, contains_normalized_phrase, detect_cues_in_query, normalize_text
 from diagnostic.data_loading import QueryRecord
 
 
-@dataclass
-class CueCase:
-    case_id: str
-    cue_a: str
-    cue_b: str
-    source: str
-    query_ids: list[int]
-    query_regex: str = ""
+class CaseValidationError(ValueError):
+    """Raised when a cue-case file is malformed."""
 
 
-def _normalize_query_text(text: str) -> str:
-    return text.casefold()
-
-
-def _cue_pattern_text(cue: Cue) -> str:
-    joined = "|".join(cue.patterns)
-    return rf"\b(?:{joined})\b"
-
-
-def _fallback_cue(name: str) -> Cue:
-    compact_space = re.escape(name).replace(r"\ ", r"\s+")
-    hyphen_as_space = re.escape(name.replace("-", " ")).replace(r"\ ", r"[\s-]+")
-    patterns = tuple(dict.fromkeys((compact_space, hyphen_as_space)))
-    return Cue(name=name, category="manual_case", patterns=patterns)
-
-
-def _strip_leading_anywhere(pattern: str) -> str:
-    if pattern.startswith(".*?"):
-        return pattern[3:]
-    if pattern.startswith(".*"):
-        return pattern[2:]
-    return pattern
-
-
-def _positive_lookahead_fragments(pattern: str) -> tuple[str, ...] | None:
-    text = pattern.strip()
-    if not text:
-        return None
-
-    fragments: list[str] = []
-    position = 0
-    while position < len(text):
-        if not text.startswith("(?=", position):
-            return None
-        depth = 1
-        index = position + 3
-        while index < len(text):
-            char = text[index]
-            if char == "\\":
-                index += 2
-                continue
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    fragments.append(_strip_leading_anywhere(text[position + 3 : index]))
-                    position = index + 1
-                    break
-            index += 1
-        else:
-            return None
-
-    return tuple(fragment for fragment in fragments if fragment) or None
-
-
-class _QueryTextIndex:
-    def __init__(self, queries: Iterable[QueryRecord]):
-        query_list = list(queries)
-        self.by_id = {query.query_id: query for query in query_list}
-        self.valid_ids = frozenset(self.by_id)
-        self._normalized_text = {
-            query.query_id: _normalize_query_text(query.text)
-            for query in query_list
-        }
-        self._regex_cache: dict[str, frozenset[int]] = {}
-        self._lookahead_fragment_cache: dict[str, tuple[str, ...] | None] = {}
-
-    @property
-    def cached_regex_fragments(self) -> int:
-        return len(self._regex_cache)
-
-    def _compile(self, pattern: str) -> re.Pattern[str]:
-        return re.compile(pattern, flags=re.IGNORECASE)
-
-    def match_regex(self, pattern: str) -> frozenset[int]:
-        if not pattern:
-            return self.valid_ids
-        if pattern not in self._regex_cache:
-            regex = self._compile(pattern)
-            self._regex_cache[pattern] = frozenset(
-                query_id
-                for query_id, text in self._normalized_text.items()
-                if regex.search(text)
-            )
-        return self._regex_cache[pattern]
-
-    def match_query_regex(self, pattern: str) -> frozenset[int]:
-        if not pattern:
-            return self.valid_ids
-        if pattern not in self._lookahead_fragment_cache:
-            self._lookahead_fragment_cache[pattern] = _positive_lookahead_fragments(pattern)
-        fragments = self._lookahead_fragment_cache[pattern]
-        if not fragments:
-            return self.match_regex(pattern)
-
-        matches: frozenset[int] | None = None
-        for fragment in fragments:
-            fragment_matches = self.match_regex(fragment)
-            matches = fragment_matches if matches is None else matches & fragment_matches
-            if not matches:
-                break
-        return matches if matches is not None else frozenset()
-
-    def match_any(self, patterns: Iterable[str]) -> frozenset[int]:
-        matches: set[int] = set()
-        for pattern in patterns:
-            matches.update(self.match_regex(pattern))
-        return frozenset(matches)
-
-
-def _load_json_or_jsonl(path: str) -> list[dict]:
-    if path.lower().endswith(".jsonl"):
-        rows = []
-        with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        return rows
-    with open(path, "r", encoding="utf-8") as handle:
+def load_cases(cases_file: Path) -> list[dict[str, Any]]:
+    with cases_file.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
-    if isinstance(data, dict):
-        data = data.get("cases", [])
-    if not isinstance(data, list):
-        raise ValueError("Cases file must be a list, {'cases': [...]}, or JSONL")
-    return data
+    if not isinstance(data, list) or not data:
+        raise CaseValidationError("Cue case file must contain a non-empty JSON list")
 
+    cases: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw_case in enumerate(data):
+        if not isinstance(raw_case, dict):
+            raise CaseValidationError(f"Case at index {index} must be a JSON object")
+        case = dict(raw_case)
+        prefix = f"Case at index {index}"
+        for field in ("case_id", "cue_a", "cue_b"):
+            if not isinstance(case.get(field), str) or not str(case[field]).strip():
+                raise CaseValidationError(f"{prefix} missing non-empty string field '{field}'")
+            case[field] = str(case[field]).strip()
+        if case["case_id"] in seen:
+            raise CaseValidationError(f"Duplicate case_id '{case['case_id']}'")
+        seen.add(case["case_id"])
 
-def _matching_query_ids(
-    queries: Iterable[QueryRecord],
-    cue_a: Cue,
-    cue_b: Cue,
-    query_regex: str = "",
-    explicit_query_ids: Iterable[int] | None = None,
-    text_index: _QueryTextIndex | None = None,
-) -> list[int]:
-    index = text_index or _QueryTextIndex(queries)
-    valid_ids = index.valid_ids
-    if explicit_query_ids is not None:
-        ids = [int(qid) for qid in explicit_query_ids if int(qid) in valid_ids]
-        if query_regex:
-            regex_ids = index.match_query_regex(query_regex)
-            ids = [qid for qid in ids if qid in regex_ids]
-        return sorted(set(ids))
-
-    regex_ids = index.match_query_regex(query_regex) if query_regex else valid_ids
-    if query_regex:
-        return sorted(regex_ids)
-    cue_ids = index.match_any((_cue_pattern_text(cue_a), _cue_pattern_text(cue_b)))
-    return sorted(regex_ids & cue_ids)
-
-
-def load_manual_cases(
-    path: str,
-    queries: list[QueryRecord],
-    cues: list[Cue],
-    text_index: _QueryTextIndex | None = None,
-    logger: logging.Logger | None = None,
-) -> list[CueCase]:
-    cue_by_name = {cue.name: cue for cue in cues}
-    rows = _load_json_or_jsonl(path)
-    unknown_cues = sorted(
-        {
-            str(row.get(field, ""))
-            for row in rows
-            for field in ("cue_a", "cue_b")
-            if str(row.get(field, "")) and str(row.get(field, "")) not in cue_by_name
-        }
-    )
-    if unknown_cues:
-        for cue_name in unknown_cues:
-            cue_by_name[cue_name] = _fallback_cue(cue_name)
-        if logger is not None:
-            shown = ", ".join(repr(cue) for cue in unknown_cues[:12])
-            hidden = len(unknown_cues) - min(len(unknown_cues), 12)
-            suffix = f", ... {hidden} more" if hidden else ""
-            logger.warning(
-                "Manual cases reference %d cues outside the loaded ontology; "
-                "using case query_regex/query_ids for selection where available and retaining cue names for CLIP scoring. "
-                "Examples: %s%s",
-                len(unknown_cues),
-                shown,
-                suffix,
-            )
-    index = text_index or _QueryTextIndex(queries)
-    cases: list[CueCase] = []
-    start = time.time()
-    for idx, row in enumerate(rows):
-        cue_a_name = str(row["cue_a"])
-        cue_b_name = str(row["cue_b"])
-        query_regex = str(row.get("query_regex", ""))
-        query_ids = _matching_query_ids(
-            queries,
-            cue_by_name[cue_a_name],
-            cue_by_name[cue_b_name],
-            query_regex=query_regex,
-            explicit_query_ids=row.get("query_ids"),
-            text_index=index,
-        )
-        case_id = str(row.get("case_id") or f"manual_{idx:04d}")
-        cases.append(CueCase(case_id, cue_a_name, cue_b_name, "manual", query_ids, query_regex))
-        if logger is not None and ((idx + 1) % 250 == 0 or idx + 1 == len(rows)):
-            logger.info(
-                "Manual case matching progress cases=%d/%d cached_regex_fragments=%d elapsed=%.1fs",
-                idx + 1,
-                len(rows),
-                index.cached_regex_fragments,
-                time.time() - start,
-            )
+        if "query_include_all" in case:
+            values = case["query_include_all"]
+            if not isinstance(values, list) or not values:
+                raise CaseValidationError(f"{prefix} field 'query_include_all' must be a non-empty list")
+            if not all(isinstance(value, str) and value.strip() for value in values):
+                raise CaseValidationError(f"{prefix} field 'query_include_all' must contain non-empty strings")
+            case["query_include_all"] = [value.strip() for value in values]
+        if "query_ids" in case:
+            values = case["query_ids"]
+            if not isinstance(values, list) or not values or not all(isinstance(value, int) for value in values):
+                raise CaseValidationError(f"{prefix} field 'query_ids' must be a non-empty integer list")
+        if "query_regex" in case:
+            if not isinstance(case["query_regex"], str) or not case["query_regex"].strip():
+                raise CaseValidationError(f"{prefix} field 'query_regex' must be a non-empty string")
+            try:
+                re.compile(case["query_regex"], flags=re.IGNORECASE)
+            except re.error as exc:
+                raise CaseValidationError(f"{prefix} has invalid query_regex: {exc}") from exc
+        for field in ("max_queries", "min_queries"):
+            if field in case and (not isinstance(case[field], int) or case[field] <= 0):
+                raise CaseValidationError(f"{prefix} field '{field}' must be a positive integer")
+        cases.append(case)
     return cases
+
+
+def case_needles(case: Mapping[str, Any]) -> list[str]:
+    if "query_include_all" in case:
+        needles = [normalize_text(value) for value in case["query_include_all"]]
+    elif "query_regex" in case:
+        needles = []
+    else:
+        needles = normalize_text(f"{case['cue_a']} {case['cue_b']}").split()
+    return [needle for needle in needles if needle]
 
 
 def generate_auto_cases(
-    queries: list[QueryRecord],
-    cues: list[Cue],
-    min_queries_per_case: int,
+    query_records: Sequence[QueryRecord],
+    gallery_pids: np.ndarray,
+    cue_specs: Sequence[CueSpec],
+    min_queries: int,
     max_cases: int | None,
-    text_index: _QueryTextIndex | None = None,
-) -> list[CueCase]:
-    index = text_index or _QueryTextIndex(queries)
-    cases: list[CueCase] = []
-    by_category: dict[str, list[Cue]] = {}
-    for cue in cues:
-        by_category.setdefault(cue.category, []).append(cue)
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[int, list[str]]]:
+    pids_with_gallery = set(int(pid) for pid in gallery_pids.tolist())
+    detected_by_query = {
+        record.query_id: detect_cues_in_query(record.text, cue_specs)
+        for record in query_records
+    }
+    pair_to_query_ids: dict[tuple[str, str], list[int]] = {}
+    for record in query_records:
+        if int(record.pid) not in pids_with_gallery:
+            continue
+        cues = sorted(set(detected_by_query.get(record.query_id, [])))
+        for cue_a, cue_b in combinations(cues, 2):
+            pair_to_query_ids.setdefault(tuple(sorted((cue_a, cue_b))), []).append(record.query_id)
 
-    for category, group in sorted(by_category.items()):
-        for i, cue_a in enumerate(group):
-            for cue_b in group[i + 1 :]:
-                query_ids = _matching_query_ids(queries, cue_a, cue_b, text_index=index)
-                if len(query_ids) < min_queries_per_case:
-                    continue
-                seed = stable_int_seed(category, cue_a.name, cue_b.name)
-                case_id = f"auto_{category}_{seed:08x}"
-                cases.append(CueCase(case_id, cue_a.name, cue_b.name, "auto", query_ids, ""))
-
-    cases.sort(key=lambda case: (-len(case.query_ids), case.case_id))
-    if max_cases is not None:
-        cases = cases[:max_cases]
-    return cases
-
-
-def build_cases(
-    queries: list[QueryRecord],
-    cues: list[Cue],
-    cases_file: str | None,
-    auto_cases: bool,
-    min_queries_per_auto_case: int,
-    max_auto_cases: int | None,
-    logger: logging.Logger | None = None,
-) -> list[CueCase]:
-    cases: list[CueCase] = []
-    text_index = _QueryTextIndex(queries)
-    if cases_file:
-        if not os.path.exists(cases_file):
-            raise FileNotFoundError(f"Cases file not found: {cases_file}")
-        cases.extend(load_manual_cases(cases_file, queries, cues, text_index=text_index, logger=logger))
-
-    should_auto = auto_cases or not cases_file
-    if should_auto:
-        cases.extend(
-            generate_auto_cases(
-                queries,
-                cues,
-                min_queries_per_case=min_queries_per_auto_case,
-                max_cases=max_auto_cases,
-                text_index=text_index,
-            )
+    rows: list[dict[str, Any]] = []
+    cases: list[dict[str, Any]] = []
+    for (cue_a, cue_b), query_ids in pair_to_query_ids.items():
+        query_ids = sorted(set(int(query_id) for query_id in query_ids))
+        case_id = f"{_slug(cue_a)}__{_slug(cue_b)}"
+        supported = len(query_ids) >= min_queries
+        rows.append(
+            {
+                "case_id": case_id,
+                "cue_a": cue_a,
+                "cue_b": cue_b,
+                "num_queries": len(query_ids),
+                "query_ids": json.dumps(query_ids),
+                "meets_min_queries": supported,
+                "kept_after_support": supported,
+                "reason": "" if supported else "below_min_queries_per_auto_case",
+            }
         )
-    return cases
+        if supported:
+            cases.append(
+                {
+                    "case_id": case_id,
+                    "cue_a": cue_a,
+                    "cue_b": cue_b,
+                    "query_ids": query_ids,
+                    "min_queries": min_queries,
+                    "selection_method": "pre_registered_auto",
+                    "auto_case_support": len(query_ids),
+                }
+            )
+    cases.sort(key=lambda case: (-int(case["auto_case_support"]), str(case["case_id"])))
+    if max_cases is not None:
+        kept = {str(case["case_id"]) for case in cases[:max_cases]}
+        cases = cases[:max_cases]
+        for row in rows:
+            if row["kept_after_support"] and row["case_id"] not in kept:
+                row["kept_after_support"] = False
+                row["reason"] = "capped_by_max_auto_cases"
+    rows.sort(key=lambda row: (-int(row["num_queries"]), str(row["case_id"])))
+    return cases, rows, detected_by_query
+
+
+def _slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", normalize_text(value))
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "cue"
+
+
+def _positive_lookahead_fragments(pattern: str) -> list[str] | None:
+    """Return fragments from generated (?=.*fragment) case regexes."""
+    fragments: list[str] = []
+    index = 0
+    prefix = "(?=.*"
+    while index < len(pattern):
+        if not pattern.startswith(prefix, index):
+            return None
+        start = index + len(prefix)
+        depth = 1
+        escaped = False
+        in_char_class = False
+        cursor = start
+        while cursor < len(pattern):
+            char = pattern[cursor]
+            if escaped:
+                escaped = False
+                cursor += 1
+                continue
+            if char == "\\":
+                escaped = True
+                cursor += 1
+                continue
+            if char == "[" and not in_char_class:
+                in_char_class = True
+                cursor += 1
+                continue
+            if char == "]" and in_char_class:
+                in_char_class = False
+                cursor += 1
+                continue
+            if not in_char_class:
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+                    if depth == 0:
+                        fragments.append(pattern[start:cursor])
+                        index = cursor + 1
+                        break
+            cursor += 1
+        else:
+            return None
+    return fragments or None
 
 
 def select_queries_for_cases(
-    cases: list[CueCase],
-    queries: list[QueryRecord],
+    dataset_name: str,
+    cases: Sequence[Mapping[str, Any]],
+    query_records: Sequence[QueryRecord],
+    gallery_pids: np.ndarray,
     max_queries_per_case: int | None,
-    seed: int,
     logger: logging.Logger | None = None,
-) -> tuple[list[dict], dict[str, list[QueryRecord]]]:
-    import random
+    progress_interval: int = 250,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    query_by_id = {record.query_id: record for record in query_records}
+    normalized_by_query_id = {record.query_id: normalize_text(record.text) for record in query_records}
+    pids_with_gallery = set(int(pid) for pid in gallery_pids.tolist())
+    fragment_match_cache: dict[str, set[int]] = {}
+    selection_started = time.perf_counter()
+    last_progress_time = selection_started
 
-    text_index = _QueryTextIndex(queries)
-    by_id = text_index.by_id
-    candidate_rows = []
-    selected: dict[str, list[QueryRecord]] = {}
-    skipped_rows = 0
-    start = time.time()
-    selected_query_count = 0
-    for idx, case in enumerate(cases, start=1):
-        regex_ids = text_index.match_query_regex(case.query_regex) if case.query_regex else text_index.valid_ids
-        ids = [qid for qid in case.query_ids if qid in by_id and qid in regex_ids]
-        skipped_rows += max(0, len(case.query_ids) - len(ids))
-        if max_queries_per_case is not None and len(ids) > max_queries_per_case:
-            rng = random.Random(stable_int_seed(seed, case.case_id, "query_selection"))
-            ids = sorted(rng.sample(ids, max_queries_per_case))
-        selected[case.case_id] = [by_id[qid] for qid in ids]
-        selected_query_count += len(ids)
-        candidate_rows.append(
-            {
-                "case_id": case.case_id,
-                "cue_a": case.cue_a,
-                "cue_b": case.cue_b,
-                "source": case.source,
-                "num_queries": len(case.query_ids),
-                "query_regex": case.query_regex,
-            }
-        )
-        if logger is not None and (idx % 250 == 0 or idx == len(cases)):
+    def matching_records_for_fragments(fragments: list[str]) -> list[QueryRecord] | None:
+        matching_sets: list[set[int]] = []
+        for fragment in fragments:
+            if fragment not in fragment_match_cache:
+                try:
+                    compiled = re.compile(fragment, flags=re.IGNORECASE)
+                except re.error:
+                    return None
+                fragment_match_cache[fragment] = {
+                    record.query_id
+                    for record in query_records
+                    if compiled.search(normalized_by_query_id[record.query_id]) is not None
+                }
+            matching_sets.append(fragment_match_cache[fragment])
+        if not matching_sets:
+            return None
+        candidate_ids = set.intersection(*matching_sets)
+        return [record for record in query_records if record.query_id in candidate_ids]
+
+    total_cases = len(cases)
+    for case_index, case in enumerate(cases, start=1):
+        case_id = str(case["case_id"])
+        regex_pattern = str(case["query_regex"]) if "query_regex" in case else None
+        regex_fragments = _positive_lookahead_fragments(regex_pattern) if regex_pattern is not None else None
+        if "query_ids" in case:
+            candidates = []
+            for query_id in case["query_ids"]:
+                record = query_by_id.get(int(query_id))
+                if record is None:
+                    skipped.append({"dataset": dataset_name, "case_id": case_id, "query_id": int(query_id), "reason": "query_id_not_in_split"})
+                    continue
+                candidates.append(record)
+            selection_method = str(case.get("selection_method", "query_ids"))
+        else:
+            needles = case_needles(case)
+            candidates = []
+            source_records = (
+                matching_records_for_fragments(regex_fragments)
+                if regex_fragments is not None
+                else None
+            )
+            regex = (
+                re.compile(regex_pattern, flags=re.IGNORECASE)
+                if regex_pattern is not None and source_records is None
+                else None
+            )
+            records_to_scan = source_records if source_records is not None else query_records
+            for record in records_to_scan:
+                normalized = normalized_by_query_id[record.query_id]
+                if not all(contains_normalized_phrase(normalized, needle) for needle in needles):
+                    continue
+                if source_records is None and regex is not None and regex.search(normalized) is None:
+                    continue
+                candidates.append(record)
+            selection_method = "query_text_filter"
+
+        valid = []
+        for record in candidates:
+            if int(record.pid) not in pids_with_gallery:
+                skipped.append({"dataset": dataset_name, "case_id": case_id, "query_id": record.query_id, "reason": "query_pid_has_no_gallery_positive"})
+                continue
+            valid.append(record)
+        limit = case.get("max_queries", max_queries_per_case)
+        if limit is not None:
+            valid = valid[: int(limit)]
+        min_queries = int(case.get("min_queries", 1))
+        if len(valid) < min_queries:
+            skipped.append({"dataset": dataset_name, "case_id": case_id, "query_id": "", "reason": "case_below_min_queries_after_validation", "num_valid": len(valid), "min_queries": min_queries})
+        for record in valid:
+            selected.append(
+                {
+                    "dataset": dataset_name,
+                    "case_id": case_id,
+                    "query_id": record.query_id,
+                    "query_text": record.text,
+                    "pid": record.pid,
+                    "cue_a": case["cue_a"],
+                    "cue_b": case["cue_b"],
+                    "selection_method": selection_method,
+                }
+            )
+        if logger is not None and (
+            case_index == 1
+            or case_index == total_cases
+            or (progress_interval > 0 and case_index % progress_interval == 0)
+        ):
+            now = time.perf_counter()
             logger.info(
                 "Query selection progress cases=%d/%d selected_queries=%d skipped_rows=%d "
-                "cached_regex_fragments=%d elapsed=%.1fs",
-                idx,
-                len(cases),
-                selected_query_count,
-                skipped_rows,
-                text_index.cached_regex_fragments,
-                time.time() - start,
+                "cached_regex_fragments=%d elapsed=%.1fs interval=%.1fs",
+                case_index,
+                total_cases,
+                len(selected),
+                len(skipped),
+                len(fragment_match_cache),
+                now - selection_started,
+                now - last_progress_time,
             )
-    return candidate_rows, selected
+            last_progress_time = now
+    return selected, skipped

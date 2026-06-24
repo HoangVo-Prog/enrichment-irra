@@ -1,102 +1,199 @@
-"""Aggregate diagnostic output folders into publication-oriented tables."""
+"""Aggregate multiple cue-swap diagnostic output folders into paper tables."""
 
 from __future__ import annotations
 
 import argparse
-import csv
-import os
+import json
 import sys
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from diagnostic.constants import (
-    SUMMARY_BY_CASE,
-    SUMMARY_OVERALL,
-    SUMMARY_WITH_CI,
-    SUMMARY_WITH_CI_CASE_QUERY,
-    SUMMARY_WITH_CI_UNIQUE_QUERY,
-    VALIDITY_COUNTS,
-)
+from diagnostic.constants import OUTPUT_FILES
 
 
-def _read_csv(path: str) -> list[dict]:
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Aggregate cue-swap diagnostic runs")
+    parser.add_argument("--input_dirs", type=Path, nargs="+", required=True)
+    parser.add_argument("--output_dir", type=Path, required=True)
+    return parser.parse_args()
 
 
-def _write_csv(path: str, rows: list[dict]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    keys = []
-    seen = set()
-    for row in rows:
-        for key in row:
-            if key not in seen:
-                keys.append(key)
-                seen.add(key)
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(rows)
+def read_csv_optional(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Aggregate cue-swap diagnostic output folders.")
-    parser.add_argument("input_dirs", nargs="+", help="Diagnostic run output directories")
-    parser.add_argument("--output_dir", required=True, help="Directory for aggregate CSV tables")
-    return parser
+def read_config(path: Path) -> dict[str, Any]:
+    config_path = path / OUTPUT_FILES["config"]
+    if not config_path.exists():
+        return {}
+    with config_path.open("r", encoding="utf-8") as handle:
+        return json.load(handle)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    generalized = []
-    hardness = []
-    validity = []
-    bootstrap_ci = []
-    for run_dir in args.input_dirs:
-        run_name = os.path.basename(os.path.abspath(run_dir))
-        for row in _read_csv(os.path.join(run_dir, SUMMARY_OVERALL)):
-            row = {"run_dir": run_dir, "run_name": run_name, **row}
-            generalized.append(row)
-            hardness.append(
-                {
-                    key: row.get(key, "")
-                    for key in (
-                        "run_dir",
-                        "run_name",
-                        "dataset",
-                        "retriever_name",
-                        "cue_scorer",
-                        "num_pairs",
-                        "hm_r1_flip",
-                        "hm_rank_shift",
-                        "delta_r1_flip",
-                        "delta_rank_shift",
-                    )
-                }
-            )
-        for row in _read_csv(os.path.join(run_dir, SUMMARY_BY_CASE)):
-            generalized.append({"run_dir": run_dir, "run_name": run_name, **row})
-        for row in _read_csv(os.path.join(run_dir, VALIDITY_COUNTS)):
-            validity.append({"run_dir": run_dir, "run_name": run_name, **row})
-        seen_ci_units = set()
-        for filename in (SUMMARY_WITH_CI_UNIQUE_QUERY, SUMMARY_WITH_CI_CASE_QUERY, SUMMARY_WITH_CI):
-            for row in _read_csv(os.path.join(run_dir, filename)):
-                unit = row.get("bootstrap_unit", "")
-                if filename == SUMMARY_WITH_CI and unit in seen_ci_units:
-                    continue
-                if filename != SUMMARY_WITH_CI and unit:
-                    seen_ci_units.add(unit)
-                bootstrap_ci.append({"run_dir": run_dir, "run_name": run_name, "source_file": filename, **row})
+def ci_lookup(summary_ci: pd.DataFrame) -> dict[str, dict[str, float]]:
+    if summary_ci.empty or "metric" not in summary_ci.columns:
+        return {}
+    return {
+        str(row["metric"]): {
+            "mean": row.get("mean"),
+            "ci_low": row.get("ci_low"),
+            "ci_high": row.get("ci_high"),
+        }
+        for _, row in summary_ci.iterrows()
+    }
 
-    _write_csv(os.path.join(args.output_dir, "generalized_cue_swap_table.csv"), generalized)
-    _write_csv(os.path.join(args.output_dir, "hardness_control_table.csv"), hardness)
-    _write_csv(os.path.join(args.output_dir, "validity_counts_table.csv"), validity)
-    _write_csv(os.path.join(args.output_dir, "bootstrap_ci_table.csv"), bootstrap_ci)
-    return 0
+
+def read_ci_frames(input_dir: Path, config: dict[str, Any]) -> list[pd.DataFrame]:
+    frames: list[pd.DataFrame] = []
+    unit_paths = {
+        "unique_query": input_dir / OUTPUT_FILES["summary_ci_unique_query"],
+        "case_query": input_dir / OUTPUT_FILES["summary_ci_case_query"],
+    }
+    for unit, path in unit_paths.items():
+        if path.exists():
+            frame = read_csv_optional(path)
+            if "bootstrap_unit" not in frame.columns:
+                frame["bootstrap_unit"] = unit
+            frames.append(frame)
+    if frames:
+        return frames
+
+    fallback = read_csv_optional(input_dir / OUTPUT_FILES["summary_ci"])
+    if fallback.empty:
+        return [fallback]
+    if "bootstrap_unit" not in fallback.columns:
+        args = config.get("args", {})
+        fallback["bootstrap_unit"] = config.get("bootstrap_unit", args.get("bootstrap_unit", "unique_query"))
+    return [fallback]
+
+
+def run_rows(input_dir: Path) -> list[dict[str, Any]]:
+    summary = read_csv_optional(input_dir / OUTPUT_FILES["summary_overall"])
+    validity = read_csv_optional(input_dir / OUTPUT_FILES["validity_counts"])
+    config = read_config(input_dir)
+    ci_frames = read_ci_frames(input_dir, config)
+    args = config.get("args", {})
+    base = summary.iloc[0].to_dict() if not summary.empty else {}
+    validity_row = validity.iloc[0].to_dict() if not validity.empty else {}
+    rows = []
+    for summary_ci in ci_frames:
+        bootstrap_unit = (
+            str(summary_ci["bootstrap_unit"].dropna().iloc[0])
+            if not summary_ci.empty and "bootstrap_unit" in summary_ci.columns and not summary_ci["bootstrap_unit"].dropna().empty
+            else str(config.get("bootstrap_unit", args.get("bootstrap_unit", "unique_query")))
+        )
+        ci = ci_lookup(summary_ci)
+
+        def ci_value(metric: str, field: str) -> Any:
+            return ci.get(metric, {}).get(field)
+
+        rows.append(
+            {
+                "input_dir": str(input_dir),
+                "bootstrap_unit": bootstrap_unit,
+                "dataset": base.get("dataset", args.get("dataset")),
+                "retriever_name": base.get("retriever_name", args.get("retriever_name")),
+                "cue_scorer": base.get("cue_scorer", args.get("cue_scorer")),
+                "ref_R1": base.get("ref_R1"),
+                "num_cases": base.get("num_cases"),
+                "num_queries": base.get("num_queries", validity_row.get("unique_queries")),
+                "num_pairs": base.get("num_pairs", validity_row.get("valid_pairs")),
+                "valid_pair_rate": base.get("valid_pair_rate", validity_row.get("valid_pair_rate")),
+                "mean_cue_shift": base.get("mean_cue_shift"),
+                "r1_flip": ci_value("r1_flip", "mean"),
+                "r1_flip_ci_low": ci_value("r1_flip", "ci_low"),
+                "r1_flip_ci_high": ci_value("r1_flip", "ci_high"),
+                "rank_shift": ci_value("rank_shift", "mean"),
+                "rank_shift_ci_low": ci_value("rank_shift", "ci_low"),
+                "rank_shift_ci_high": ci_value("rank_shift", "ci_high"),
+                "hm_r1_flip": ci_value("hm_r1_flip", "mean"),
+                "hm_r1_flip_ci_low": ci_value("hm_r1_flip", "ci_low"),
+                "hm_r1_flip_ci_high": ci_value("hm_r1_flip", "ci_high"),
+                "delta_r1_flip": ci_value("delta_r1_flip", "mean"),
+                "delta_r1_flip_ci_low": ci_value("delta_r1_flip", "ci_low"),
+                "delta_r1_flip_ci_high": ci_value("delta_r1_flip", "ci_high"),
+                "hm_rank_shift": ci_value("hm_rank_shift", "mean"),
+                "hm_rank_shift_ci_low": ci_value("hm_rank_shift", "ci_low"),
+                "hm_rank_shift_ci_high": ci_value("hm_rank_shift", "ci_high"),
+                "delta_rank_shift": ci_value("delta_rank_shift", "mean"),
+                "delta_rank_shift_ci_low": ci_value("delta_rank_shift", "ci_low"),
+                "delta_rank_shift_ci_high": ci_value("delta_rank_shift", "ci_high"),
+            }
+        )
+    return rows
+
+
+def main() -> None:
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    rows = [row for input_dir in args.input_dirs for row in run_rows(input_dir)]
+    combined = pd.DataFrame(rows)
+
+    general_cols = [
+        "dataset",
+        "retriever_name",
+        "bootstrap_unit",
+        "cue_scorer",
+        "ref_R1",
+        "num_cases",
+        "num_queries",
+        "num_pairs",
+        "valid_pair_rate",
+        "mean_cue_shift",
+        "r1_flip",
+        "r1_flip_ci_low",
+        "r1_flip_ci_high",
+        "rank_shift",
+        "rank_shift_ci_low",
+        "rank_shift_ci_high",
+    ]
+    hardness_cols = [
+        "dataset",
+        "retriever_name",
+        "bootstrap_unit",
+        "cue_scorer",
+        "hm_r1_flip",
+        "hm_r1_flip_ci_low",
+        "hm_r1_flip_ci_high",
+        "r1_flip",
+        "r1_flip_ci_low",
+        "r1_flip_ci_high",
+        "delta_r1_flip",
+        "delta_r1_flip_ci_low",
+        "delta_r1_flip_ci_high",
+        "hm_rank_shift",
+        "hm_rank_shift_ci_low",
+        "hm_rank_shift_ci_high",
+        "rank_shift",
+        "rank_shift_ci_low",
+        "rank_shift_ci_high",
+        "delta_rank_shift",
+        "delta_rank_shift_ci_low",
+        "delta_rank_shift_ci_high",
+    ]
+    validity_cols = [
+        "dataset",
+        "retriever_name",
+        "bootstrap_unit",
+        "cue_scorer",
+        "num_cases",
+        "num_queries",
+        "num_pairs",
+        "valid_pair_rate",
+        "mean_cue_shift",
+    ]
+    combined.reindex(columns=general_cols).to_csv(args.output_dir / "generalized_cue_swap_table.csv", index=False)
+    combined.reindex(columns=hardness_cols).to_csv(args.output_dir / "hardness_control_table.csv", index=False)
+    combined.reindex(columns=validity_cols).to_csv(args.output_dir / "validity_counts_table.csv", index=False)
+    print(combined.reindex(columns=general_cols).to_string(index=False))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

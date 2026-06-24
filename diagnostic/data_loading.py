@@ -33,6 +33,9 @@ class SplitData:
     num_classes: int
 
 
+SplitMetadata = SplitData
+
+
 def _dataset_factory():
     from datasets.cuhkpedes import CUHKPEDES
     from datasets.icfgpedes import ICFGPEDES
@@ -147,6 +150,10 @@ def load_split(args: Any, split: str, metadata_only: bool = False) -> SplitData:
         if exc.name != "torchvision":
             raise
         return _load_split_without_torchvision(args, split)
+
+
+def load_split_metadata(repo_args: Any, split: str) -> SplitMetadata:
+    return load_split(repo_args, split, metadata_only=True)
 
 
 class _EvalTransform:

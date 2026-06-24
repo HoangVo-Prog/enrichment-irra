@@ -1,195 +1,112 @@
-"""Optimized cluster bootstrap over explicit diagnostic cluster units."""
+"""Cluster bootstrap confidence intervals over query clusters."""
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from typing import Sequence
 
 import numpy as np
+import pandas as pd
 
-from diagnostic.constants import (
-    BOOTSTRAP_METRICS,
-    BOOTSTRAP_UNIT_CASE_QUERY,
-    BOOTSTRAP_UNIT_UNIQUE_QUERY,
-    CASE_QUERY_CLUSTER_COLS,
-    UNIQUE_QUERY_CLUSTER_COLS,
-)
+from diagnostic.constants import SUMMARY_CI_COLUMNS
 
 
-def cluster_key(row: dict, cluster_columns: Sequence[str]) -> tuple:
-    return tuple(row.get(column, "") for column in cluster_columns)
-
-
-def group_rows_by_cluster(rows: Iterable[dict], cluster_columns: Sequence[str]) -> dict[tuple, list[dict]]:
-    grouped: dict[tuple, list[dict]] = {}
-    for row in rows:
-        grouped.setdefault(cluster_key(row, cluster_columns), []).append(row)
-    return grouped
-
-
-def bootstrap_count_stats(rows: Sequence[dict], cluster_columns: Sequence[str]) -> dict[str, int]:
-    unique_queries = {
-        (row.get("dataset", ""), row.get("retriever_name", ""), row.get("query_id", ""))
-        for row in rows
-    }
-    case_queries = {
-        (row.get("dataset", ""), row.get("retriever_name", ""), row.get("case_id", ""), row.get("query_id", ""))
-        for row in rows
-    }
-    clusters = {cluster_key(row, cluster_columns) for row in rows}
-    return {
-        "cluster_count": len(clusters),
-        "unique_query_count": len(unique_queries),
-        "case_query_count": len(case_queries),
-        "trial_count": len(rows),
-    }
-
-
-def cluster_columns_for_unit(bootstrap_unit: str) -> tuple[str, ...]:
-    if bootstrap_unit == BOOTSTRAP_UNIT_CASE_QUERY:
-        return CASE_QUERY_CLUSTER_COLS
-    if bootstrap_unit == BOOTSTRAP_UNIT_UNIQUE_QUERY:
-        return UNIQUE_QUERY_CLUSTER_COLS
-    raise ValueError(f"Unsupported bootstrap unit: {bootstrap_unit}")
-
-
-def bootstrap_unit_label(bootstrap_unit: str) -> str:
-    if bootstrap_unit == BOOTSTRAP_UNIT_CASE_QUERY:
-        return "case-query-instance cluster bootstrap"
-    if bootstrap_unit == BOOTSTRAP_UNIT_UNIQUE_QUERY:
-        return "unique-query cluster bootstrap"
-    raise ValueError(f"Unsupported bootstrap unit: {bootstrap_unit}")
-
-
-def _value(row: dict, metric: str) -> float:
-    value = row.get(metric, 0.0)
-    if value in ("", None):
-        return 0.0
-    return float(value)
-
-
-def _empty_rows(
-    metrics: Sequence[str],
-    iters: int,
-    bootstrap_unit: str,
-    counts: dict[str, int] | None = None,
-) -> list[dict]:
-    counts = counts or {
-        "cluster_count": 0,
-        "unique_query_count": 0,
-        "case_query_count": 0,
-        "trial_count": 0,
-    }
-    return [
-        {
-            "metric": metric,
-            "mean": 0.0,
-            "ci_low": 0.0,
-            "ci_high": 0.0,
-            "bootstrap_iters": int(iters),
-            "bootstrap_unit": bootstrap_unit,
-            **counts,
+def bootstrap_count_summary(df: pd.DataFrame, cluster_cols: Sequence[str]) -> dict[str, int]:
+    if df.empty:
+        return {
+            "cluster_count": 0,
+            "unique_query_count": 0,
+            "case_query_count": 0,
+            "trial_count": 0,
         }
-        for metric in metrics
-    ]
+    required_for_counts = {"dataset", "retriever_name", "query_id", "case_id"}
+    missing = required_for_counts - set(df.columns)
+    if missing:
+        raise ValueError(f"Bootstrap count summary missing columns: {sorted(missing)}")
+    missing_cluster = set(cluster_cols) - set(df.columns)
+    if missing_cluster:
+        raise ValueError(f"Bootstrap count summary missing cluster columns: {sorted(missing_cluster)}")
+    return {
+        "cluster_count": int(df[list(cluster_cols)].drop_duplicates().shape[0]),
+        "unique_query_count": int(
+            df[["dataset", "retriever_name", "query_id"]].drop_duplicates().shape[0]
+        ),
+        "case_query_count": int(
+            df[["dataset", "retriever_name", "case_id", "query_id"]].drop_duplicates().shape[0]
+        ),
+        "trial_count": int(len(df)),
+    }
+
+
+def cluster_row_counts(df: pd.DataFrame, cluster_cols: Sequence[str]) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=list(cluster_cols) + ["row_count"])
+    return df.groupby(list(cluster_cols), dropna=False).size().reset_index(name="row_count")
 
 
 def cluster_bootstrap_ci(
-    rows: Iterable[dict],
-    metric_columns: Iterable[str] = BOOTSTRAP_METRICS,
-    cluster_columns: Sequence[str] = CASE_QUERY_CLUSTER_COLS,
-    bootstrap_iters: int = 1000,
-    bootstrap_seed: int = 123,
-    bootstrap_unit: str = BOOTSTRAP_UNIT_CASE_QUERY,
-) -> list[dict]:
-    rows = list(rows)
-    metric_columns = list(metric_columns)
-    counts = bootstrap_count_stats(rows, cluster_columns)
-    if not rows:
-        return _empty_rows(metric_columns, bootstrap_iters, bootstrap_unit, counts)
+    df: pd.DataFrame,
+    metrics: Sequence[str],
+    cluster_cols: Sequence[str],
+    iters: int,
+    seed: int,
+    bootstrap_unit: str,
+) -> pd.DataFrame:
+    columns = SUMMARY_CI_COLUMNS
+    if df.empty:
+        return pd.DataFrame(columns=columns)
 
-    cluster_index: dict[tuple, int] = {}
-    sums = []
-    row_counts = []
-    for row in rows:
-        key = cluster_key(row, cluster_columns)
-        if key not in cluster_index:
-            cluster_index[key] = len(cluster_index)
-            sums.append(np.zeros(len(metric_columns), dtype=np.float64))
-            row_counts.append(0)
-        idx = cluster_index[key]
-        for metric_idx, metric in enumerate(metric_columns):
-            sums[idx][metric_idx] += _value(row, metric)
-        row_counts[idx] += 1
+    missing = set(cluster_cols) - set(df.columns)
+    if missing:
+        raise ValueError(f"Cluster bootstrap missing cluster columns: {sorted(missing)}")
 
-    sum_arr = np.vstack(sums)
-    count_arr = np.asarray(row_counts, dtype=np.float64)
-    total_count = float(count_arr.sum())
-    observed = sum_arr.sum(axis=0) / max(total_count, 1.0)
-    cluster_count = len(cluster_index)
+    count_summary = bootstrap_count_summary(df, cluster_cols)
+    cluster_codes = df.groupby(list(cluster_cols), dropna=False).ngroup().to_numpy()
+    cluster_count = int(cluster_codes.max()) + 1 if len(cluster_codes) else 0
+    rng = np.random.default_rng(seed)
+    rows = []
+    for metric in metrics:
+        if metric not in df.columns:
+            continue
+        metric_values = pd.to_numeric(df[metric], errors="coerce").to_numpy(dtype=float)
+        valid_mask = np.isfinite(metric_values)
+        values = metric_values[valid_mask]
+        if values.size == 0:
+            rows.append(
+                {
+                    "metric": metric,
+                    "mean": np.nan,
+                    "ci_low": np.nan,
+                    "ci_high": np.nan,
+                    "bootstrap_iters": iters,
+                    "bootstrap_unit": bootstrap_unit,
+                    "cluster_count": cluster_count,
+                    "unique_query_count": count_summary["unique_query_count"],
+                    "case_query_count": count_summary["case_query_count"],
+                    "trial_count": int(len(df)),
+                }
+            )
+            continue
 
-    rng = np.random.default_rng(bootstrap_seed)
-    boot = np.zeros((max(bootstrap_iters, 0), len(metric_columns)), dtype=np.float64)
-    if bootstrap_iters > 0 and cluster_count > 0:
-        for i in range(bootstrap_iters):
-            sample = rng.integers(0, cluster_count, size=cluster_count)
-            sample_sums = sum_arr[sample].sum(axis=0)
-            sample_count = count_arr[sample].sum()
-            boot[i, :] = sample_sums / max(sample_count, 1.0)
-
-    rows_out = []
-    counts = {
-        **counts,
-        "cluster_count": int(cluster_count),
-        "trial_count": int(len(rows)),
-    }
-    for metric_idx, metric in enumerate(metric_columns):
-        if bootstrap_iters > 0:
-            ci_low, ci_high = np.quantile(boot[:, metric_idx], [0.025, 0.975])
-        else:
-            ci_low = ci_high = observed[metric_idx]
-        rows_out.append(
+        valid_codes = cluster_codes[valid_mask]
+        cluster_sums = np.bincount(valid_codes, weights=values, minlength=cluster_count).astype(float)
+        cluster_counts = np.bincount(valid_codes, minlength=cluster_count).astype(float)
+        sampled = rng.integers(0, cluster_count, size=(iters, cluster_count))
+        sampled_sums = cluster_sums[sampled].sum(axis=1)
+        sampled_counts = cluster_counts[sampled].sum(axis=1)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            boot = sampled_sums / sampled_counts
+        rows.append(
             {
                 "metric": metric,
-                "mean": float(observed[metric_idx]),
-                "ci_low": float(ci_low),
-                "ci_high": float(ci_high),
-                "bootstrap_iters": int(bootstrap_iters),
+                "mean": float(np.mean(values)),
+                "ci_low": float(np.nanpercentile(boot, 2.5)),
+                "ci_high": float(np.nanpercentile(boot, 97.5)),
+                "bootstrap_iters": iters,
                 "bootstrap_unit": bootstrap_unit,
-                **counts,
+                "cluster_count": cluster_count,
+                "unique_query_count": count_summary["unique_query_count"],
+                "case_query_count": count_summary["case_query_count"],
+                "trial_count": int(len(df)),
             }
         )
-    return rows_out
-
-
-def cluster_bootstrap_by_unit(
-    rows: Iterable[dict],
-    metrics: Iterable[str] = BOOTSTRAP_METRICS,
-    iters: int = 1000,
-    seed: int = 123,
-    bootstrap_unit: str = BOOTSTRAP_UNIT_UNIQUE_QUERY,
-) -> list[dict]:
-    return cluster_bootstrap_ci(
-        rows,
-        metric_columns=metrics,
-        cluster_columns=cluster_columns_for_unit(bootstrap_unit),
-        bootstrap_iters=iters,
-        bootstrap_seed=seed,
-        bootstrap_unit=bootstrap_unit,
-    )
-
-
-def cluster_bootstrap(
-    rows: Iterable[dict],
-    metrics: Iterable[str] = BOOTSTRAP_METRICS,
-    iters: int = 1000,
-    seed: int = 123,
-) -> list[dict]:
-    """Backward-compatible case-query-instance cluster bootstrap."""
-
-    return cluster_bootstrap_by_unit(
-        rows,
-        metrics=metrics,
-        iters=iters,
-        seed=seed,
-        bootstrap_unit=BOOTSTRAP_UNIT_CASE_QUERY,
-    )
+    return pd.DataFrame(rows, columns=columns)

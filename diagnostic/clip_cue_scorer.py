@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Sequence
 
 import numpy as np
 
-from diagnostic.constants import PROMPT_TEMPLATES
-from diagnostic.cue_ontology import cue_prompts
+from diagnostic.constants import DEFAULT_PROMPT_TEMPLATES
 
 
 @dataclass
-class CueScoreResult:
-    scores: dict[str, np.ndarray]
-    prompts: dict[str, list[str]]
+class CueScorerOutput:
+    cues: list[str]
+    affinities: dict[str, np.ndarray]
+    prompts_by_cue: dict[str, list[str]]
     image_features_shape: tuple[int, int]
+
+    @property
+    def scores(self) -> dict[str, np.ndarray]:
+        return self.affinities
+
+    @property
+    def prompts(self) -> dict[str, list[str]]:
+        return self.prompts_by_cue
 
 
 class OffTheShelfCLIPCueScorer:
@@ -25,20 +32,31 @@ class OffTheShelfCLIPCueScorer:
     def __init__(
         self,
         model_name: str,
-        device: str,
-        image_size: tuple[int, int],
-        stride_size: int,
-        prompt_templates: Iterable[str] = PROMPT_TEMPLATES,
+        repo_args_or_device,
+        device=None,
+        logger=None,
+        image_size: tuple[int, int] | None = None,
+        stride_size: int | None = None,
+        prompt_templates: Iterable[str] = DEFAULT_PROMPT_TEMPLATES,
     ) -> None:
         import torch
         from model.clip_model import build_CLIP_from_openai_pretrained
 
         self.model_name = model_name
-        self.device = torch.device(device)
-        self.image_size = image_size
-        self.stride_size = stride_size
+        if device is None:
+            self.device = torch.device(repo_args_or_device)
+            if image_size is None or stride_size is None:
+                raise ValueError("image_size and stride_size are required when repo args are not provided")
+        else:
+            self.device = torch.device(device)
+            image_size = tuple(getattr(repo_args_or_device, "img_size", image_size or (384, 128)))
+            stride_size = int(getattr(repo_args_or_device, "stride_size", stride_size or 16))
+        self.image_size = tuple(image_size)
+        self.stride_size = int(stride_size)
         self.prompt_templates = tuple(prompt_templates)
-        self.model, _ = build_CLIP_from_openai_pretrained(model_name, image_size, stride_size)
+        if logger is not None:
+            logger.info("Loading off-the-shelf CLIP cue scorer: %s", model_name)
+        self.model, _ = build_CLIP_from_openai_pretrained(model_name, self.image_size, self.stride_size)
         self.model.to(self.device)
         self.model.eval()
         for parameter in self.model.parameters():
@@ -71,7 +89,7 @@ class OffTheShelfCLIPCueScorer:
                 logger.info("CLIP cue image batches encoded: %d", batch_idx + 1)
         return torch.cat(features, 0)
 
-    def encode_cues(self, cues: Iterable[str], text_length: int):
+    def encode_cues(self, cues: Sequence[str], text_length: int):
         import torch
         import torch.nn.functional as F
         from utils.simple_tokenizer import SimpleTokenizer
@@ -80,7 +98,7 @@ class OffTheShelfCLIPCueScorer:
         cue_features = []
         cue_prompt_map = {}
         for cue in cues:
-            prompts = cue_prompts(cue, self.prompt_templates)
+            prompts = [template.format(cue=cue) for template in self.prompt_templates]
             cue_prompt_map[cue] = prompts
             tokens = torch.stack([self._tokenize(prompt, tokenizer, text_length) for prompt in prompts], dim=0).to(self.device)
             with torch.no_grad():
@@ -103,7 +121,7 @@ class OffTheShelfCLIPCueScorer:
         result[: len(tokens)] = torch.tensor(tokens)
         return result
 
-    def score(self, cues: Iterable[str], img_loader, text_length: int, logger=None) -> CueScoreResult:
+    def score(self, cues: Sequence[str], img_loader, text_length: int, logger=None) -> CueScorerOutput:
         import torch
 
         cues = list(dict.fromkeys(cues))
@@ -115,9 +133,10 @@ class OffTheShelfCLIPCueScorer:
             matrix = image_features.float() @ cue_features.float().t()
         matrix_np = matrix.numpy()
         scores = {cue: matrix_np[:, idx].astype(np.float32, copy=False) for idx, cue in enumerate(cues)}
-        return CueScoreResult(
-            scores=scores,
-            prompts=prompt_map,
+        return CueScorerOutput(
+            cues=cues,
+            affinities=scores,
+            prompts_by_cue=prompt_map,
             image_features_shape=(int(image_features.shape[0]), int(image_features.shape[1])),
         )
 
@@ -143,7 +162,7 @@ def threshold_rows(
                 "min": float(values.min()) if values.size else 0.0,
                 "max": float(values.max()) if values.size else 0.0,
                 "num_gallery": int(values.size),
-                "prompts_json": json.dumps(prompts.get(cue, []), sort_keys=True),
+                "prompts_json": str(prompts.get(cue, [])),
             }
         )
     return thresholds, rows

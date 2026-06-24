@@ -1,110 +1,91 @@
-"""Retrieval and cue-shift metrics."""
+"""Retrieval and diagnostic metric utilities."""
 
 from __future__ import annotations
 
-import math
-from typing import Iterable
+from typing import Dict, Tuple
 
 import numpy as np
 
 
-def sigmoid(x: np.ndarray) -> np.ndarray:
-    x = np.clip(x, -60.0, 60.0)
-    return 1.0 / (1.0 + np.exp(-x))
+def stable_descending_order(scores: np.ndarray) -> np.ndarray:
+    return np.lexsort((np.arange(len(scores)), -scores))
 
 
-def deterministic_order(scores: np.ndarray, image_ids: Iterable[int] | None = None) -> np.ndarray:
-    scores = np.asarray(scores, dtype=np.float64)
-    if image_ids is None:
-        image_ids = np.arange(scores.shape[0])
-    image_ids = np.asarray(list(image_ids), dtype=np.int64)
-    return np.lexsort((image_ids, -scores))
-
-
-def retrieval_metrics(
-    scores: np.ndarray,
-    gallery_pids: np.ndarray,
-    query_pid: int,
-    image_ids: Iterable[int] | None = None,
-) -> dict[str, float]:
-    scores = np.asarray(scores, dtype=np.float64)
-    gallery_pids = np.asarray(gallery_pids)
-    order = deterministic_order(scores, image_ids=image_ids)
-    matches = gallery_pids[order] == int(query_pid)
-    num_rel = int(matches.sum())
-    if num_rel == 0:
-        return {
-            "R1": 0.0,
-            "R5": 0.0,
-            "R10": 0.0,
-            "AP": 0.0,
-            "best_positive_rank": math.inf,
-        }
-    positive_positions = np.flatnonzero(matches)
-    best_rank = int(positive_positions[0]) + 1
-    ranks = positive_positions + 1
-    precisions = np.arange(1, num_rel + 1, dtype=np.float64) / ranks
+def retrieval_metrics(scores: np.ndarray, is_positive: np.ndarray) -> Dict[str, float]:
+    if int(is_positive.sum()) == 0:
+        raise ValueError("retrieval_metrics called with no positive gallery item")
+    order = stable_descending_order(scores)
+    matches = is_positive[order].astype(np.int64)
+    positive_ranks = np.flatnonzero(matches) + 1
+    cumulative = np.cumsum(matches)
+    precisions = cumulative[positive_ranks - 1] / positive_ranks
     return {
-        "R1": float(best_rank <= 1),
-        "R5": float(best_rank <= 5),
-        "R10": float(best_rank <= 10),
-        "AP": float(precisions.mean()),
-        "best_positive_rank": float(best_rank),
+        "R1": float(matches[:1].any() * 100.0),
+        "R5": float(matches[:5].any() * 100.0),
+        "R10": float(matches[:10].any() * 100.0),
+        "AP": float(precisions.mean() * 100.0),
+        "best_positive_rank": float(positive_ranks.min()),
     }
 
 
-def paired_retrieval_metrics(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
-    return {
-        "r1_flip": float(a["R1"] != b["R1"]),
-        "rank_shift": float(abs(a["best_positive_rank"] - b["best_positive_rank"])),
-        "ap_delta": float(abs(a["AP"] - b["AP"])),
-    }
+def sigmoid_np(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, -60.0, 60.0)
+    return 1.0 / (1.0 + np.exp(-values))
 
 
-def cue_density(
-    gallery_ids: Iterable[int],
-    query_pid: int,
-    gallery_pids: np.ndarray,
-    cue_scores: np.ndarray,
+def density_over_indices(
+    psi: np.ndarray,
+    indices: np.ndarray,
     threshold: float,
     tau_density: float,
-) -> float:
-    ids = np.asarray(list(gallery_ids), dtype=np.int64)
-    if ids.size == 0:
-        return 0.0
-    distractor_ids = ids[gallery_pids[ids] != int(query_pid)]
-    if distractor_ids.size == 0:
-        return 0.0
-    values = sigmoid((cue_scores[distractor_ids] - threshold) / tau_density)
-    return float(values.mean())
+) -> Tuple[float, float]:
+    if len(indices) == 0:
+        return float("nan"), float("nan")
+    values = psi[indices]
+    hard = float(np.mean(values > threshold))
+    soft = float(np.mean(sigmoid_np((values - threshold) / tau_density)))
+    return hard, soft
+
+
+def gallery_distractor_indices(gallery_indices: np.ndarray, gallery_pids: np.ndarray, pid: int) -> np.ndarray:
+    return gallery_indices[gallery_pids[gallery_indices] != int(pid)]
 
 
 def cue_shift(
-    gallery_a_ids: Iterable[int],
-    gallery_b_ids: Iterable[int],
-    query_pid: int,
+    gallery_a: np.ndarray,
+    gallery_b: np.ndarray,
     gallery_pids: np.ndarray,
-    cue_a_scores: np.ndarray,
-    cue_b_scores: np.ndarray,
+    pid: int,
+    psi_a: np.ndarray,
+    psi_b: np.ndarray,
     threshold_a: float,
     threshold_b: float,
     tau_density: float,
-) -> dict[str, float]:
-    d_a_ga = cue_density(gallery_a_ids, query_pid, gallery_pids, cue_a_scores, threshold_a, tau_density)
-    d_a_gb = cue_density(gallery_b_ids, query_pid, gallery_pids, cue_a_scores, threshold_a, tau_density)
-    d_b_ga = cue_density(gallery_a_ids, query_pid, gallery_pids, cue_b_scores, threshold_b, tau_density)
-    d_b_gb = cue_density(gallery_b_ids, query_pid, gallery_pids, cue_b_scores, threshold_b, tau_density)
+) -> Dict[str, float]:
+    distractors_a = gallery_distractor_indices(gallery_a, gallery_pids, pid)
+    distractors_b = gallery_distractor_indices(gallery_b, gallery_pids, pid)
+    hard_a_a, soft_a_a = density_over_indices(psi_a, distractors_a, threshold_a, tau_density)
+    hard_a_b, soft_a_b = density_over_indices(psi_a, distractors_b, threshold_a, tau_density)
+    hard_b_a, soft_b_a = density_over_indices(psi_b, distractors_a, threshold_b, tau_density)
+    hard_b_b, soft_b_b = density_over_indices(psi_b, distractors_b, threshold_b, tau_density)
+    shift = 0.5 * ((soft_a_a - soft_a_b) + (soft_b_b - soft_b_a))
     return {
-        "cue_density_a_ga": d_a_ga,
-        "cue_density_a_gb": d_a_gb,
-        "cue_density_b_ga": d_b_ga,
-        "cue_density_b_gb": d_b_gb,
-        "cue_shift": float(0.5 * ((d_a_ga - d_a_gb) + (d_b_gb - d_b_ga))),
+        "cue_shift": float(shift),
+        "D_hard_a_a_dense": hard_a_a,
+        "D_soft_a_a_dense": soft_a_a,
+        "D_hard_a_b_dense": hard_a_b,
+        "D_soft_a_b_dense": soft_a_b,
+        "D_hard_b_a_dense": hard_b_a,
+        "D_soft_b_a_dense": soft_b_a,
+        "D_hard_b_b_dense": hard_b_b,
+        "D_soft_b_b_dense": soft_b_b,
     }
 
 
-def positive_ratio(gallery_ids: Iterable[int], query_pid: int, gallery_pids: np.ndarray) -> float:
-    ids = np.asarray(list(gallery_ids), dtype=np.int64)
-    if ids.size == 0:
-        return 0.0
-    return float((gallery_pids[ids] == int(query_pid)).mean())
+def paired_metrics(metrics_a: Dict[str, float], metrics_b: Dict[str, float]) -> Dict[str, float]:
+    return {
+        "r1_flip": float(metrics_a["R1"] != metrics_b["R1"]),
+        "rank_shift": float(abs(metrics_a["best_positive_rank"] - metrics_b["best_positive_rank"])),
+        "ap_delta": float(metrics_a["AP"] - metrics_b["AP"]),
+    }
+

@@ -2,51 +2,52 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+import logging
+
+import torch
+import torch.nn.functional as F
+
+from diagnostic.scoring import RetrieverEmbeddingCache
 
 
-@dataclass
-class EmbeddingSet:
-    embeddings: Any
-    pids: Any
+def extract_retriever_embeddings(
+    adapter,
+    img_loader,
+    txt_loader,
+    use_grab: bool = False,
+    logger: logging.Logger | None = None,
+) -> RetrieverEmbeddingCache:
+    if use_grab:
+        raise ValueError("IRRA diagnostics support only global text/image embeddings")
 
-
-def _normalize(features):
-    import torch.nn.functional as F
-
-    return F.normalize(features.float(), p=2, dim=1)
-
-
-def extract_text_embeddings(adapter, txt_loader) -> EmbeddingSet:
-    import torch
-
-    all_pids = []
-    all_features = []
+    query_global = []
+    gallery_global = []
     adapter.eval()
-    for pid, caption in txt_loader:
-        with torch.no_grad():
-            features = adapter.encode_text(caption)
-        all_pids.append(pid.view(-1).cpu())
-        all_features.append(_normalize(features).cpu())
-    return EmbeddingSet(torch.cat(all_features, 0), torch.cat(all_pids, 0).numpy())
+    with torch.no_grad():
+        for batch_index, (_pid, captions) in enumerate(txt_loader, start=1):
+            feats = adapter.encode_text(captions)
+            query_global.append(F.normalize(feats.float(), p=2, dim=1).cpu())
+            if logger is not None and batch_index % 50 == 0:
+                logger.info("Encoded IRRA text batches=%d", batch_index)
+        for batch_index, (_pid, images) in enumerate(img_loader, start=1):
+            feats = adapter.encode_image(images)
+            gallery_global.append(F.normalize(feats.float(), p=2, dim=1).cpu())
+            if logger is not None and batch_index % 50 == 0:
+                logger.info("Encoded IRRA image batches=%d", batch_index)
+    return RetrieverEmbeddingCache(
+        query_global=torch.cat(query_global, dim=0),
+        gallery_global=torch.cat(gallery_global, dim=0),
+        query_grab=None,
+        gallery_grab=None,
+    )
 
 
-def extract_image_embeddings(adapter, img_loader) -> EmbeddingSet:
-    import torch
+def extract_retrieval_embeddings(adapter, split_data):
+    cache = extract_retriever_embeddings(
+        adapter,
+        split_data.img_loader,
+        split_data.txt_loader,
+        use_grab=False,
+    )
+    return cache.query_global, cache.gallery_global
 
-    all_pids = []
-    all_features = []
-    adapter.eval()
-    for pid, image in img_loader:
-        with torch.no_grad():
-            features = adapter.encode_image(image)
-        all_pids.append(pid.view(-1).cpu())
-        all_features.append(_normalize(features).cpu())
-    return EmbeddingSet(torch.cat(all_features, 0), torch.cat(all_pids, 0).numpy())
-
-
-def extract_retrieval_embeddings(adapter, split_data) -> tuple[EmbeddingSet, EmbeddingSet]:
-    text = extract_text_embeddings(adapter, split_data.txt_loader)
-    image = extract_image_embeddings(adapter, split_data.img_loader)
-    return text, image

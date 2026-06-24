@@ -1,84 +1,95 @@
-"""IRRA cosine scoring and whole-test sanity metrics."""
+"""IRRA retriever score computation and full-test sanity metrics."""
 
 from __future__ import annotations
 
-import logging
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 import numpy as np
+import torch
 
 from diagnostic.metrics import retrieval_metrics
 
 
-def resolve_score_mode(score_mode: str, has_grab: bool = False) -> str:
-    if score_mode == "auto":
+@dataclass
+class RetrieverEmbeddingCache:
+    query_global: torch.Tensor
+    gallery_global: torch.Tensor
+    query_grab: Optional[torch.Tensor] = None
+    gallery_grab: Optional[torch.Tensor] = None
+
+
+def resolve_score_mode(mode: str, has_grab: bool = False, lambda_global: float = 1.0) -> str:
+    if mode == "auto":
         return "global"
-    if score_mode != "global":
-        raise ValueError(f"Unsupported score mode for IRRA: {score_mode}")
-    return score_mode
+    if mode != "global":
+        raise ValueError(f"--score_mode {mode} is not supported for IRRA diagnostics")
+    return mode
 
 
-def score_gallery(score_vector: np.ndarray, gallery_ids: Iterable[int]) -> np.ndarray:
-    ids = np.asarray(list(gallery_ids), dtype=np.int64)
-    return np.asarray(score_vector[ids], dtype=np.float64)
+def query_gallery_scores(
+    cache: RetrieverEmbeddingCache,
+    query_id: int,
+    gallery_indices: Sequence[int],
+    mode: str,
+    lambda_global: float,
+) -> np.ndarray:
+    if mode != "global":
+        raise ValueError(f"Unsupported IRRA score mode: {mode}")
+    idx = torch.as_tensor(gallery_indices, dtype=torch.long)
+    return (cache.query_global[int(query_id)] @ cache.gallery_global[idx].T).cpu().numpy()
 
 
-def whole_test_metrics(query_embeddings, gallery_embeddings, query_pids, gallery_pids) -> dict[str, float]:
-    import torch
+def full_query_scores(
+    cache: RetrieverEmbeddingCache,
+    query_id: int,
+    mode: str,
+    lambda_global: float,
+) -> np.ndarray:
+    gallery_indices = np.arange(cache.gallery_global.shape[0], dtype=np.int64)
+    return query_gallery_scores(cache, query_id, gallery_indices, mode, lambda_global)
 
-    if len(query_pids) == 0 or len(gallery_pids) == 0:
-        return {"R1": 0.0, "R5": 0.0, "R10": 0.0, "mAP": 0.0, "num_queries": 0, "num_gallery": 0}
-    q = query_embeddings
-    g = gallery_embeddings
-    if not torch.is_tensor(q):
-        q = torch.as_tensor(q)
-    if not torch.is_tensor(g):
-        g = torch.as_tensor(g)
-    sim = (q.float() @ g.float().t()).cpu().numpy()
-    rows = [retrieval_metrics(sim[i], gallery_pids, int(pid)) for i, pid in enumerate(query_pids)]
+
+def full_similarity_chunk(
+    cache: RetrieverEmbeddingCache,
+    start: int,
+    end: int,
+    mode: str,
+    lambda_global: float,
+) -> torch.Tensor:
+    if mode != "global":
+        raise ValueError(f"Unsupported IRRA score mode: {mode}")
+    return cache.query_global[start:end] @ cache.gallery_global.T
+
+
+def compute_full_test_metrics(
+    cache: RetrieverEmbeddingCache,
+    query_pids: np.ndarray,
+    gallery_pids: np.ndarray,
+    mode: str,
+    lambda_global: float,
+    chunk_size: int = 128,
+) -> dict[str, float]:
+    g_pids = np.asarray(gallery_pids, dtype=np.int64)
+    rows = []
+    for start in range(0, len(query_pids), chunk_size):
+        end = min(start + chunk_size, len(query_pids))
+        scores = full_similarity_chunk(cache, start, end, mode, lambda_global).cpu().numpy()
+        for offset, row_scores in enumerate(scores):
+            query_index = start + offset
+            is_positive = g_pids == int(query_pids[query_index])
+            if not is_positive.any():
+                continue
+            rows.append(retrieval_metrics(row_scores, is_positive))
+    if not rows:
+        raise RuntimeError("No full-test queries had gallery positives")
     return {
-        "R1": float(np.mean([row["R1"] for row in rows]) * 100.0),
-        "R5": float(np.mean([row["R5"] for row in rows]) * 100.0),
-        "R10": float(np.mean([row["R10"] for row in rows]) * 100.0),
-        "mAP": float(np.mean([row["AP"] for row in rows]) * 100.0),
-        "num_queries": int(len(query_pids)),
-        "num_gallery": int(len(gallery_pids)),
+        "mode": mode,
+        "R1": float(np.mean([row["R1"] for row in rows])),
+        "R5": float(np.mean([row["R5"] for row in rows])),
+        "R10": float(np.mean([row["R10"] for row in rows])),
+        "mAP": float(np.mean([row["AP"] for row in rows])),
+        "mean_best_positive_rank": float(np.mean([row["best_positive_rank"] for row in rows])),
+        "num_queries": int(len(rows)),
     }
 
-
-def precompute_score_cache(
-    query_embeddings,
-    gallery_embeddings,
-    query_ids: Iterable[int],
-    device: str,
-    logger: logging.Logger | None = None,
-    chunk_size: int = 128,
-) -> dict[int, np.ndarray]:
-    import torch
-
-    unique_query_ids = sorted(set(int(qid) for qid in query_ids))
-    if not unique_query_ids:
-        return {}
-    if logger is not None:
-        logger.info("Precomputing full score vectors for %d selected queries", len(unique_query_ids))
-
-    q = query_embeddings.float() if torch.is_tensor(query_embeddings) else torch.as_tensor(query_embeddings).float()
-    g = gallery_embeddings.float() if torch.is_tensor(gallery_embeddings) else torch.as_tensor(gallery_embeddings).float()
-    use_device = torch.device(device)
-    cache: dict[int, np.ndarray] = {}
-    g_dev = g.to(use_device)
-    for start in range(0, len(unique_query_ids), chunk_size):
-        ids = unique_query_ids[start : start + chunk_size]
-        q_dev = q[ids].to(use_device)
-        with torch.no_grad():
-            scores = q_dev @ g_dev.t()
-        scores_np = scores.detach().cpu().numpy()
-        for row_idx, qid in enumerate(ids):
-            cache[int(qid)] = scores_np[row_idx].astype(np.float32, copy=False)
-    if logger is not None:
-        logger.info("Finished score precompute: score_cache_queries=%d", len(cache))
-    return cache
-
-
-def query_reference_rank(score_vector: np.ndarray, gallery_pids: np.ndarray, query_pid: int) -> float:
-    return retrieval_metrics(score_vector, gallery_pids, query_pid)["best_positive_rank"]

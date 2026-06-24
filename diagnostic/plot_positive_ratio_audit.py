@@ -1,95 +1,87 @@
-"""Build positive-ratio CSV/PNG audits from diagnostic runs."""
+"""Positive-ratio audit for diagnostic output folders."""
 
 from __future__ import annotations
 
 import argparse
-import csv
-import os
 import sys
-from collections import defaultdict
+from pathlib import Path
+
+import pandas as pd
 
 if __package__ is None or __package__ == "":
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from diagnostic.constants import PER_GALLERY_RESULTS
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Audit positive ratios in per-gallery diagnostic results.")
-    parser.add_argument("input_dirs", nargs="+", help="Diagnostic run output directories")
-    parser.add_argument("--output_dir", required=True, help="Directory for audit outputs")
-    parser.add_argument("--png_name", default="positive_ratio_audit.png")
-    parser.add_argument("--csv_name", default="positive_ratio_audit.csv")
-    return parser
+from diagnostic.constants import OUTPUT_FILES
 
 
-def _read_rows(path: str) -> list[dict]:
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", newline="", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Audit positive-image ratios in diagnostic galleries")
+    parser.add_argument("--input_dirs", type=Path, nargs="+", required=True)
+    parser.add_argument("--labels", nargs="+", default=None)
+    parser.add_argument("--output_dir", type=Path, required=True)
+    return parser.parse_args()
 
 
-def _write_rows(path: str, rows: list[dict]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    fieldnames = ["run_name", "dataset", "case_id", "gallery_type", "count", "mean_positive_ratio"]
-    with open(path, "w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+def read_run(input_dir: Path, label: str) -> pd.DataFrame:
+    path = input_dir / OUTPUT_FILES["per_gallery"]
+    if not path.exists():
+        raise FileNotFoundError(f"Missing {OUTPUT_FILES['per_gallery']}: {path}")
+    df = pd.read_csv(path)
+    if "positive_ratio" not in df.columns:
+        df["positive_ratio"] = df["num_positives"] / df["gallery_size"]
+    df["positive_pct"] = 100.0 * df["positive_ratio"]
+    df["run_label"] = label
+    df["input_dir"] = str(input_dir)
+    return df
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    grouped = defaultdict(list)
-    for run_dir in args.input_dirs:
-        run_name = os.path.basename(os.path.abspath(run_dir))
-        for row in _read_rows(os.path.join(run_dir, PER_GALLERY_RESULTS)):
-            key = (run_name, row.get("dataset", ""), row.get("case_id", ""), row.get("gallery_type", ""))
-            try:
-                grouped[key].append(float(row.get("positive_ratio", 0.0) or 0.0))
-            except ValueError:
-                grouped[key].append(0.0)
+def main() -> None:
+    args = parse_args()
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    labels = args.labels or [path.name for path in args.input_dirs]
+    if len(labels) != len(args.input_dirs):
+        raise ValueError("--labels length must match --input_dirs length")
+    frames = [read_run(path, label) for path, label in zip(args.input_dirs, labels)]
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    df.to_csv(args.output_dir / "combined_positive_ratio_rows.csv", index=False)
+    if df.empty:
+        pd.DataFrame().to_csv(args.output_dir / "combined_positive_ratio_overall.csv", index=False)
+        return
 
-    rows = []
-    for (run_name, dataset, case_id, gallery_type), values in sorted(grouped.items()):
-        mean_value = sum(values) / len(values) if values else 0.0
-        rows.append(
-            {
-                "run_name": run_name,
-                "dataset": dataset,
-                "case_id": case_id,
-                "gallery_type": gallery_type,
-                "count": len(values),
-                "mean_positive_ratio": mean_value,
-            }
+    group_cols = ["run_label", "dataset", "retriever_name", "construction_type", "gallery_type"]
+    summary = (
+        df.groupby(group_cols)
+        .agg(
+            num_galleries=("positive_pct", "size"),
+            mean_positive_pct=("positive_pct", "mean"),
+            median_positive_pct=("positive_pct", "median"),
+            max_positive_pct=("positive_pct", "max"),
         )
+        .reset_index()
+    )
+    summary.to_csv(args.output_dir / "combined_positive_ratio_overall.csv", index=False)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    csv_path = os.path.join(args.output_dir, args.csv_name)
-    _write_rows(csv_path, rows)
-
-    png_path = os.path.join(args.output_dir, args.png_name)
     try:
+        import matplotlib
+
+        matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        labels = [f"{row['run_name']}:{row['gallery_type']}" for row in rows]
-        values = [float(row["mean_positive_ratio"]) for row in rows]
-        width = max(8, min(24, len(labels) * 0.35))
-        fig, ax = plt.subplots(figsize=(width, 5))
-        ax.bar(range(len(values)), values)
-        ax.set_ylabel("Mean positive ratio")
-        ax.set_ylim(0, max(values + [0.01]) * 1.2)
-        ax.set_xticks(range(len(labels)))
-        ax.set_xticklabels(labels, rotation=90, fontsize=7)
-        fig.tight_layout()
-        fig.savefig(png_path, dpi=160)
-        plt.close(fig)
-    except Exception:
-        with open(png_path + ".skipped.txt", "w", encoding="utf-8") as handle:
-            handle.write("matplotlib was unavailable or plotting failed; CSV audit was still written.\n")
-    return 0
+        plt.figure(figsize=(9, 5))
+        for label, group in df.groupby("run_label"):
+            plt.hist(group["positive_pct"], bins=30, alpha=0.45, label=label)
+        plt.xlabel("Positive images in gallery (%)")
+        plt.ylabel("Number of galleries")
+        plt.title("Positive fraction in constructed galleries")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(args.output_dir / "combined_positive_pct_hist.png", dpi=200)
+        plt.close()
+    except ImportError:
+        pass
+    print(summary.to_string(index=False))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
+
