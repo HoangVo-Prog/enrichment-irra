@@ -1,9 +1,15 @@
-"""IRRA split loading and normalized diagnostic records."""
+"""Dataset split loading and normalized query/gallery records."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, Tuple
+
+import numpy as np
+from torch.utils.data import DataLoader
 
 
 @dataclass(frozen=True)
@@ -25,229 +31,126 @@ class SplitData:
     dataset: Any
     query_records: list[QueryRecord]
     gallery_records: list[GalleryRecord]
-    query_pids: Any
-    gallery_pids: Any
+    query_pids: np.ndarray
+    gallery_pids: np.ndarray
     gallery_paths: list[str]
-    img_loader: Any
-    txt_loader: Any
+    img_loader: DataLoader
+    txt_loader: DataLoader
     num_classes: int
 
 
-SplitMetadata = SplitData
+@dataclass
+class SplitMetadata:
+    query_records: list[QueryRecord]
+    gallery_records: list[GalleryRecord]
+    query_pids: np.ndarray
+    gallery_pids: np.ndarray
+    gallery_paths: list[str]
 
 
-def _dataset_factory():
+def load_split_metadata(repo_args: SimpleNamespace, split: str) -> SplitMetadata:
+    dataset_name = repo_args.dataset_name
+    root_dir = Path(repo_args.root_dir)
+    if dataset_name == "RSTPReid":
+        dataset_dir = root_dir / "RSTPReid"
+        anno_path = dataset_dir / "data_captions.json"
+        image_key = "img_path"
+    elif dataset_name == "CUHK-PEDES":
+        dataset_dir = root_dir / "CUHK-PEDES"
+        anno_path = dataset_dir / "reid_raw.json"
+        image_key = "file_path"
+    elif dataset_name == "ICFG-PEDES":
+        dataset_dir = root_dir / "ICFG-PEDES"
+        anno_path = dataset_dir / "ICFG-PEDES.json"
+        image_key = "file_path"
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
+    if not anno_path.exists():
+        raise FileNotFoundError(f"Dataset annotation file not found: {anno_path}")
+
+    with anno_path.open("r", encoding="utf-8") as handle:
+        annos = json.load(handle)
+    query_records: list[QueryRecord] = []
+    gallery_records: list[GalleryRecord] = []
+    query_id = 0
+    for image_id, anno in enumerate(annos):
+        if anno.get("split") != split:
+            continue
+        pid = int(anno["id"])
+        path = str(dataset_dir / "imgs" / anno[image_key])
+        gallery_records.append(GalleryRecord(image_id=len(gallery_records), path=path, pid=pid))
+        for caption in anno.get("captions", []):
+            query_records.append(QueryRecord(query_id=query_id, text=str(caption), pid=pid))
+            query_id += 1
+    if not query_records or not gallery_records:
+        raise RuntimeError(f"No records found for {dataset_name} split {split}")
+    return SplitMetadata(
+        query_records=query_records,
+        gallery_records=gallery_records,
+        query_pids=np.asarray([record.pid for record in query_records], dtype=np.int64),
+        gallery_pids=np.asarray([record.pid for record in gallery_records], dtype=np.int64),
+        gallery_paths=[record.path for record in gallery_records],
+    )
+
+
+def load_split(repo_args: SimpleNamespace, split: str) -> SplitData:
+    from datasets.bases import ImageDataset, TextDataset
+    from datasets.build import build_transforms
     from datasets.cuhkpedes import CUHKPEDES
     from datasets.icfgpedes import ICFGPEDES
     from datasets.rstpreid import RSTPReid
 
-    return {
+    factories = {
         "CUHK-PEDES": CUHKPEDES,
         "ICFG-PEDES": ICFGPEDES,
         "RSTPReid": RSTPReid,
     }
+    if repo_args.dataset_name not in factories:
+        raise ValueError(f"Unsupported dataset: {repo_args.dataset_name}")
+    dataset = factories[repo_args.dataset_name](root=repo_args.root_dir)
+    if not hasattr(dataset, split):
+        raise ValueError(f"Dataset {repo_args.dataset_name} has no split '{split}'")
+    split_ds = getattr(dataset, split)
 
+    transform = build_transforms(img_size=repo_args.img_size, is_train=False)
+    img_set = ImageDataset(split_ds["image_pids"], split_ds["img_paths"], transform)
+    txt_set = TextDataset(
+        split_ds["caption_pids"],
+        split_ds["captions"],
+        text_length=repo_args.text_length,
+    )
+    img_loader = DataLoader(
+        img_set,
+        batch_size=repo_args.test_batch_size,
+        shuffle=False,
+        num_workers=repo_args.num_workers,
+    )
+    txt_loader = DataLoader(
+        txt_set,
+        batch_size=repo_args.test_batch_size,
+        shuffle=False,
+        num_workers=repo_args.num_workers,
+    )
 
-def _direct_metadata(args: Any, split: str) -> SplitData:
-    import json
-    import os.path as op
-    import numpy as np
-
-    specs = {
-        "CUHK-PEDES": ("CUHK-PEDES", "reid_raw.json", "file_path"),
-        "ICFG-PEDES": ("ICFG-PEDES", "ICFG-PEDES.json", "file_path"),
-        "RSTPReid": ("RSTPReid", "data_captions.json", "img_path"),
-    }
-    dataset_dir, anno_name, path_key = specs[args.dataset_name]
-    dataset_root = op.join(args.root_dir, dataset_dir)
-    img_dir = op.join(dataset_root, "imgs")
-    anno_path = op.join(dataset_root, anno_name)
-    if not op.exists(anno_path):
-        raise RuntimeError(f"'{anno_path}' is not available")
-    with open(anno_path, "r", encoding="utf-8") as handle:
-        annotations = json.load(handle)
-
-    selected = [anno for anno in annotations if anno.get("split") == split]
-    train_ids = {int(anno["id"]) for anno in annotations if anno.get("split") == "train"}
-    query_records: list[QueryRecord] = []
-    gallery_records: list[GalleryRecord] = []
-    for image_id, anno in enumerate(selected):
-        pid = int(anno["id"])
-        img_path = op.join(img_dir, anno[path_key])
-        gallery_records.append(GalleryRecord(image_id=image_id, path=img_path, pid=pid))
-        for caption in anno.get("captions", []):
-            query_records.append(QueryRecord(query_id=len(query_records), text=str(caption), pid=pid))
+    query_records = [
+        QueryRecord(query_id=index, text=str(text), pid=int(pid))
+        for index, (pid, text) in enumerate(zip(txt_set.caption_pids, txt_set.captions))
+    ]
+    gallery_records = [
+        GalleryRecord(image_id=index, path=str(Path(path)), pid=int(pid))
+        for index, (pid, path) in enumerate(zip(img_set.image_pids, img_set.img_paths))
+    ]
+    if not query_records or not gallery_records:
+        raise RuntimeError(f"No records found for {repo_args.dataset_name} split {split}")
 
     return SplitData(
-        dataset=None,
+        dataset=dataset,
         query_records=query_records,
         gallery_records=gallery_records,
-        query_pids=np.asarray([r.pid for r in query_records], dtype=np.int64),
-        gallery_pids=np.asarray([r.pid for r in gallery_records], dtype=np.int64),
-        gallery_paths=[r.path for r in gallery_records],
-        img_loader=None,
-        txt_loader=None,
-        num_classes=len(train_ids),
-    )
-
-
-def load_split(args: Any, split: str, metadata_only: bool = False) -> SplitData:
-    import numpy as np
-
-    if metadata_only:
-        return _direct_metadata(args, split)
-
-    try:
-        factory = _dataset_factory()
-        dataset = factory[args.dataset_name](root=args.root_dir, verbose=False)
-        ds = dataset.val if split == "val" else dataset.test
-
-        query_records = [
-            QueryRecord(query_id=i, text=str(text), pid=int(pid))
-            for i, (pid, text) in enumerate(zip(ds["caption_pids"], ds["captions"]))
-        ]
-        gallery_records = [
-            GalleryRecord(image_id=i, path=str(path), pid=int(pid))
-            for i, (pid, path) in enumerate(zip(ds["image_pids"], ds["img_paths"]))
-        ]
-
-        query_pids = np.asarray([r.pid for r in query_records], dtype=np.int64)
-        gallery_pids = np.asarray([r.pid for r in gallery_records], dtype=np.int64)
-        gallery_paths = [r.path for r in gallery_records]
-
-        from torch.utils.data import DataLoader
-        from datasets.bases import ImageDataset, TextDataset
-        from datasets.build import build_transforms
-
-        transform = build_transforms(img_size=args.img_size, is_train=False)
-        img_set = ImageDataset(ds["image_pids"], ds["img_paths"], transform)
-        txt_set = TextDataset(ds["caption_pids"], ds["captions"], text_length=args.text_length)
-        img_loader = DataLoader(
-            img_set,
-            batch_size=args.test_batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-        )
-        txt_loader = DataLoader(
-            txt_set,
-            batch_size=args.test_batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-        )
-
-        return SplitData(
-            dataset=dataset,
-            query_records=query_records,
-            gallery_records=gallery_records,
-            query_pids=query_pids,
-            gallery_pids=gallery_pids,
-            gallery_paths=gallery_paths,
-            img_loader=img_loader,
-            txt_loader=txt_loader,
-            num_classes=len(dataset.train_id_container),
-        )
-    except ModuleNotFoundError as exc:
-        if exc.name != "torchvision":
-            raise
-        return _load_split_without_torchvision(args, split)
-
-
-def load_split_metadata(repo_args: Any, split: str) -> SplitMetadata:
-    return load_split(repo_args, split, metadata_only=True)
-
-
-class _EvalTransform:
-    def __init__(self, img_size):
-        import numpy as np
-
-        self.height, self.width = int(img_size[0]), int(img_size[1])
-        self.mean = np.asarray([0.48145466, 0.4578275, 0.40821073], dtype=np.float32)
-        self.std = np.asarray([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
-
-    def __call__(self, image):
-        import numpy as np
-        import torch
-
-        image = image.resize((self.width, self.height))
-        array = np.asarray(image, dtype=np.float32) / 255.0
-        array = (array - self.mean) / self.std
-        array = array.transpose(2, 0, 1)
-        return torch.from_numpy(array)
-
-
-class _LocalImageDataset:
-    def __init__(self, records, transform):
-        self.records = records
-        self.transform = transform
-
-    def __len__(self):
-        return len(self.records)
-
-    def __getitem__(self, index):
-        from PIL import Image
-
-        record = self.records[index]
-        image = Image.open(record.path).convert("RGB")
-        return record.pid, self.transform(image)
-
-
-class _LocalTextDataset:
-    def __init__(self, records, text_length):
-        self.records = records
-        self.text_length = text_length
-        from utils.simple_tokenizer import SimpleTokenizer
-
-        self.tokenizer = SimpleTokenizer()
-
-    def __len__(self):
-        return len(self.records)
-
-    def __getitem__(self, index):
-        import torch
-
-        record = self.records[index]
-        sot_token = self.tokenizer.encoder["<|startoftext|>"]
-        eot_token = self.tokenizer.encoder["<|endoftext|>"]
-        tokens = [sot_token] + self.tokenizer.encode(record.text) + [eot_token]
-        result = torch.zeros(self.text_length, dtype=torch.long)
-        if len(tokens) > self.text_length:
-            tokens = tokens[: self.text_length]
-            tokens[-1] = eot_token
-        result[: len(tokens)] = torch.tensor(tokens)
-        return record.pid, result
-
-
-def _load_split_without_torchvision(args: Any, split: str) -> SplitData:
-    from torch.utils.data import DataLoader
-
-    data = _direct_metadata(args, split)
-    transform = _EvalTransform(args.img_size)
-    data.img_loader = DataLoader(
-        _LocalImageDataset(data.gallery_records, transform),
-        batch_size=args.test_batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
-    data.txt_loader = DataLoader(
-        _LocalTextDataset(data.query_records, args.text_length),
-        batch_size=args.test_batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-    )
-    return data
-
-
-def empty_split() -> SplitData:
-    import numpy as np
-
-    return SplitData(
-        dataset=None,
-        query_records=[],
-        gallery_records=[],
-        query_pids=np.asarray([], dtype=np.int64),
-        gallery_pids=np.asarray([], dtype=np.int64),
-        gallery_paths=[],
-        img_loader=None,
-        txt_loader=None,
-        num_classes=0,
+        query_pids=np.asarray([record.pid for record in query_records], dtype=np.int64),
+        gallery_pids=np.asarray([record.pid for record in gallery_records], dtype=np.int64),
+        gallery_paths=[record.path for record in gallery_records],
+        img_loader=img_loader,
+        txt_loader=txt_loader,
+        num_classes=len(dataset.train_id_container),
     )

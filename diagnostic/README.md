@@ -6,6 +6,10 @@ independent off-the-shelf CLIP cue scorer to produce external cue-affinity
 scores; IRRA scores are used only for retrieval metrics and for the
 hardness-matched control.
 
+For parity with the prototype diagnostic, the cue scorer uses the private
+`diagnostic/prototype_clip_model.py` implementation instead of IRRA's
+`model.clip_model`.
+
 The main entrypoint is:
 
 ```bash
