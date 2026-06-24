@@ -63,6 +63,8 @@ class OffTheShelfCLIPCueScorer:
             parameter.requires_grad_(False)
 
     def _pool_image_features(self, features):
+        if isinstance(features, (tuple, list)):
+            features = features[0]
         if features.ndim == 3:
             return features[:, 0, :]
         return features
@@ -70,6 +72,8 @@ class OffTheShelfCLIPCueScorer:
     def _pool_text_features(self, features, tokens):
         import torch
 
+        if isinstance(features, (tuple, list)):
+            features = features[0]
         if features.ndim == 3:
             return features[torch.arange(features.shape[0], device=features.device), tokens.argmax(dim=-1)]
         return features
