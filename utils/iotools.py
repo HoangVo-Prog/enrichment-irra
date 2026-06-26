@@ -67,8 +67,9 @@ def get_text_embedding(path, length):
 def save_train_configs(path, args):
     if not os.path.exists(path):
         os.makedirs(path)
-    with open(f'{path}/configs.yaml', 'w') as f:
-        yaml.dump(vars(args), f, default_flow_style=False)
+    for filename in ("config.yaml", "configs.yaml"):
+        with open(osp.join(path, filename), 'w') as f:
+            yaml.dump(vars(args), f, default_flow_style=False)
 
 def load_train_configs(path):
     with open(path, 'r') as f:
