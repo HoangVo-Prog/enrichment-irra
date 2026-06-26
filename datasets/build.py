@@ -7,6 +7,7 @@ from datasets.sampler_ddp import RandomIdentitySampler_DDP
 from torch.utils.data.distributed import DistributedSampler
 
 from utils.comm import get_world_size
+from utils.reproducibility import seed_worker, seeded_generator
 
 from .bases import ImageDataset, TextDataset, ImageTextDataset, ImageTextMLMDataset
 
@@ -15,6 +16,10 @@ from .icfgpedes import ICFGPEDES
 from .rstpreid import RSTPReid
 
 __factory = {'CUHK-PEDES': CUHKPEDES, 'ICFG-PEDES': ICFGPEDES, 'RSTPReid': RSTPReid}
+
+
+def _loader_seed(args, offset=0):
+    return int(getattr(args, "seed", 1)) + int(offset)
 
 
 def build_transforms(img_size=(384, 128), aug=False, is_train=True):
@@ -112,7 +117,9 @@ def build_dataloader(args, tranforms=None):
                                               dataset.train, args.batch_size,
                                               args.num_instance),
                                           num_workers=num_workers,
-                                          collate_fn=collate)
+                                          collate_fn=collate,
+                                          worker_init_fn=seed_worker,
+                                          generator=seeded_generator(_loader_seed(args, 201)))
         elif args.sampler == 'random':
             # TODO add distributed condition
             logger.info('using random sampler')
@@ -120,7 +127,9 @@ def build_dataloader(args, tranforms=None):
                                       batch_size=args.batch_size,
                                       shuffle=True,
                                       num_workers=num_workers,
-                                      collate_fn=collate)
+                                      collate_fn=collate,
+                                      worker_init_fn=seed_worker,
+                                      generator=seeded_generator(_loader_seed(args, 301)))
         else:
             logger.error('unsupported sampler! expected softmax or triplet but got {}'.format(args.sampler))
 
@@ -135,11 +144,15 @@ def build_dataloader(args, tranforms=None):
         val_img_loader = DataLoader(val_img_set,
                                     batch_size=args.batch_size,
                                     shuffle=False,
-                                    num_workers=num_workers)
+                                    num_workers=num_workers,
+                                    worker_init_fn=seed_worker,
+                                    generator=seeded_generator(_loader_seed(args, 401)))
         val_txt_loader = DataLoader(val_txt_set,
                                     batch_size=args.batch_size,
                                     shuffle=False,
-                                    num_workers=num_workers)
+                                    num_workers=num_workers,
+                                    worker_init_fn=seed_worker,
+                                    generator=seeded_generator(_loader_seed(args, 501)))
 
         return train_loader, val_img_loader, val_txt_loader, num_classes
 
@@ -161,9 +174,13 @@ def build_dataloader(args, tranforms=None):
         test_img_loader = DataLoader(test_img_set,
                                      batch_size=args.test_batch_size,
                                      shuffle=False,
-                                     num_workers=num_workers)
+                                     num_workers=num_workers,
+                                     worker_init_fn=seed_worker,
+                                     generator=seeded_generator(_loader_seed(args, 601)))
         test_txt_loader = DataLoader(test_txt_set,
                                      batch_size=args.test_batch_size,
                                      shuffle=False,
-                                     num_workers=num_workers)
+                                     num_workers=num_workers,
+                                     worker_init_fn=seed_worker,
+                                     generator=seeded_generator(_loader_seed(args, 701)))
         return test_img_loader, test_txt_loader, num_classes

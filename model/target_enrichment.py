@@ -147,6 +147,8 @@ def validate_target_enrichment_args(args):
         raise ValueError("top_m must be >= 1")
     if float(_arg(args, "lambda_ret", 1.0)) <= 0:
         raise ValueError("lambda_ret must be > 0")
+    if float(_arg(args, "tau", 0.015)) <= 0:
+        raise ValueError("tau must be > 0")
     if int(_arg(args, "num_parts", 6)) < 1:
         raise ValueError("num_parts must be >= 1")
     rank_lambda = float(_arg(args, "topm_rank_lambda", 0.5))
@@ -492,6 +494,7 @@ class TargetPrototypeEnricher(nn.Module):
         self.lambda_ret = float(_arg(args, "lambda_ret", 1.0))
         self.topm_rank_lambda = float(_arg(args, "topm_rank_lambda", 0.5))
         self.temperature = float(_arg(args, "temperature", 0.02))
+        self.tau = float(_arg(args, "tau", 0.015))
         self.gate_mode = str(_arg(args, "gate_mode", _arg(args, "residual_gate", "residual"))).lower()
         self.active_dim = self.global_dim if self.enrichment_space == "global" else self.retrieval_dim
         self.proto_to_global = nn.Identity() if self.evidence_dim == self.global_dim else nn.Linear(self.evidence_dim, self.global_dim)
@@ -647,7 +650,7 @@ class TargetPrototypeEnricher(nn.Module):
         positives = query_pids[:, None].eq(pool_pids[None, :])
         if not positives.any(dim=1).all():
             raise ValueError("every query must have at least one positive target image in the pool")
-        logits = enriched @ retrieval_images.t() / max(self.temperature, 1e-6)
+        logits = enriched @ retrieval_images.t() / max(self.tau, 1e-6)
         pos_logits = logits.masked_fill(~positives, float("-inf"))
         return -(torch.logsumexp(pos_logits, dim=1) - torch.logsumexp(logits, dim=1)).mean()
 

@@ -1,11 +1,10 @@
 import os
 import os.path as op
 import torch
-import numpy as np
-import random
 import time
 
 from datasets import build_dataloader
+from datasets.target_pool import TargetPoolManager
 from processor.processor import do_train
 from utils.checkpoint import Checkpointer
 from utils.iotools import save_train_configs
@@ -15,21 +14,127 @@ from model import build_model
 from utils.metrics import Evaluator
 from utils.options import get_args
 from utils.comm import get_rank, synchronize
+from utils.reproducibility import configure_reproducibility
 
 
-def set_seed(seed=0):
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = True
+def _strip_module_prefix(key):
+    return key[7:] if key.startswith("module.") else key
+
+
+def _unwrap_checkpoint_state_dict(checkpoint):
+    for key in ("model", "state_dict"):
+        if isinstance(checkpoint, dict) and isinstance(checkpoint.get(key), dict):
+            return checkpoint[key]
+    if isinstance(checkpoint, dict):
+        return checkpoint
+    raise TypeError("Checkpoint must be a state dict or contain a 'model'/'state_dict' entry")
+
+
+def _load_checkpoint_file(checkpoint_file):
+    try:
+        return torch.load(checkpoint_file, map_location="cpu")
+    except RuntimeError as torch_load_error:
+        try:
+            return torch.jit.load(checkpoint_file, map_location="cpu").state_dict()
+        except RuntimeError:
+            raise torch_load_error
+
+
+def _iter_finetune_candidates(raw_key, base_model_subkeys):
+    key = _strip_module_prefix(raw_key)
+    direct_candidates = [key]
+    if key.startswith("model."):
+        direct_candidates.append(key[len("model."):])
+
+    candidates = []
+    seen = set()
+    for candidate in direct_candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        candidates.append(candidate)
+        if not candidate.startswith("base_model.") and candidate in base_model_subkeys:
+            mapped = "base_model." + candidate
+            if mapped not in seen:
+                seen.add(mapped)
+                candidates.append(mapped)
+    return candidates
+
+
+def _load_matching_checkpoint(model, checkpoint_file, logger, *, host_only=False):
+    checkpoint = _load_checkpoint_file(checkpoint_file)
+    state_dict = _unwrap_checkpoint_state_dict(checkpoint)
+    model_state = model.state_dict()
+    base_model_subkeys = {
+        key[len("base_model."):]
+        for key in model_state.keys()
+        if key.startswith("base_model.")
+    }
+    update_state = {}
+    skipped_enrichment = 0
+    skipped_missing = 0
+    skipped_shape = 0
+    skipped_non_tensor = 0
+
+    for raw_key, value in state_dict.items():
+        normalized_key = _strip_module_prefix(raw_key)
+        if (
+            normalized_key.startswith("target_enricher.")
+            or normalized_key.startswith("model.target_enricher.")
+            or normalized_key.startswith("prototype_branch.")
+            or normalized_key.startswith("model.prototype_branch.")
+        ):
+            skipped_enrichment += 1
+            continue
+        if not torch.is_tensor(value):
+            skipped_non_tensor += 1
+            continue
+
+        has_name_match = False
+        loaded = False
+        for candidate_key in _iter_finetune_candidates(raw_key, base_model_subkeys):
+            if host_only and not candidate_key.startswith("base_model."):
+                continue
+            if candidate_key not in model_state:
+                continue
+            has_name_match = True
+            if model_state[candidate_key].shape != value.shape:
+                continue
+            update_state[candidate_key] = value.detach().clone()
+            loaded = True
+            break
+
+        if loaded:
+            continue
+        if has_name_match:
+            skipped_shape += 1
+        else:
+            skipped_missing += 1
+
+    if not update_state:
+        raise RuntimeError(f"No compatible weights found in checkpoint: {checkpoint_file}")
+
+    model_state.update(update_state)
+    model.load_state_dict(model_state)
+    logger.info(
+        "Loaded %d tensor(s) from %s; skipped %d enrichment/prototype, %d missing, "
+        "%d shape-mismatch, %d non-tensor entries",
+        len(update_state),
+        checkpoint_file,
+        skipped_enrichment,
+        skipped_missing,
+        skipped_shape,
+        skipped_non_tensor,
+    )
 
 
 if __name__ == '__main__':
     args = get_args()
-    set_seed(1+get_rank())
+    configure_reproducibility(
+        args.seed,
+        deterministic=args.deterministic,
+        warn_only=args.deterministic_warn_only,
+    )
     name = args.name
 
     num_gpus = int(os.environ["WORLD_SIZE"]) if "WORLD_SIZE" in os.environ else 1
@@ -54,6 +159,15 @@ if __name__ == '__main__':
     logger.info('Total params: %2.fM' % (sum(p.numel() for p in model.parameters()) / 1000000.0))
     model.to(device)
 
+    if args.finetune:
+        logger.info("loading finetune checkpoint {}".format(args.finetune))
+        _load_matching_checkpoint(model, args.finetune, logger, host_only=False)
+    if args.finetune_clip:
+        logger.info("loading host-compatible finetune checkpoint {}".format(args.finetune_clip))
+        # IRRA does not share ITSELF/GRAB task heads, so this path intentionally
+        # warm-starts only compatible host/base-model tensors.
+        _load_matching_checkpoint(model, args.finetune_clip, logger, host_only=True)
+
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model,
@@ -67,11 +181,15 @@ if __name__ == '__main__':
 
     is_master = get_rank() == 0
     checkpointer = Checkpointer(model, optimizer, scheduler, args.output_dir, is_master)
-    evaluator = Evaluator(val_img_loader, val_txt_loader)
+    evaluator = Evaluator(val_img_loader, val_txt_loader, args)
 
     start_epoch = 1
     if args.resume:
         checkpoint = checkpointer.resume(args.resume_ckpt_file)
         start_epoch = checkpoint['epoch']
 
-    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer)
+    target_pool = None
+    if getattr(args, "target_enrichment", False):
+        target_pool = TargetPoolManager(train_loader.dataset, args, logger)
+
+    do_train(start_epoch, args, model, train_loader, evaluator, optimizer, scheduler, checkpointer, target_pool)

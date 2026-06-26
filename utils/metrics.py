@@ -46,10 +46,13 @@ def scaled_fuse(primary, secondary, primary_weight):
 
 
 class Evaluator():
-    def __init__(self, img_loader, txt_loader):
+    def __init__(self, img_loader, txt_loader, args=None):
         self.img_loader = img_loader
         self.txt_loader = txt_loader
+        self.args = args
         self.logger = logging.getLogger("IRRA.eval")
+        self.last_metrics = {}
+        self.last_best_task = None
 
     def _compute_embedding(self, model):
         model = model.eval()
@@ -108,7 +111,9 @@ class Evaluator():
         enriched_queries = torch.cat(chunks, dim=0)
         return enriched_queries @ retrieval_images.t()
 
-    def eval(self, model, i2t_metric=False):
+    def eval(self, model, i2t_metric=False, use_target_enrichment=None):
+        if use_target_enrichment is None:
+            use_target_enrichment = bool(getattr(model.args, "target_enrichment", False))
         qfeats, gfeats, rqfeats, rgfeats, qids, gids = self._compute_embedding(model)
         qfeats = F.normalize(qfeats, p=2, dim=1)
         gfeats = F.normalize(gfeats, p=2, dim=1)
@@ -119,7 +124,7 @@ class Evaluator():
             "global-t2i": qfeats @ gfeats.t(),
             "retrieval-t2i": rqfeats @ rgfeats.t(),
         }
-        if bool(getattr(model.args, "target_enrichment", False)) and getattr(model, "target_enricher", None) is not None:
+        if use_target_enrichment and getattr(model, "target_enricher", None) is not None:
             target_score = self._target_scores(model, qfeats, rqfeats)
             scores["target+proto(1)-t2i"] = target_score
             for base_name in ["global-t2i", "retrieval-t2i"]:
@@ -140,5 +145,12 @@ class Evaluator():
             table.custom_format[column] = lambda f, v: f"{v:.3f}"
         self.logger.info('\n' + str(table))
 
-        best_r1 = max(row["R1"] for row in metrics.values())
+        best_task, best_values = max(metrics.items(), key=lambda item: item[1]["R1"])
+        best_r1 = best_values["R1"]
+        self.last_metrics = {
+            f"eval/{task}/{metric}": value
+            for task, row in metrics.items()
+            for metric, value in row.items()
+        }
+        self.last_best_task = best_task
         return best_r1

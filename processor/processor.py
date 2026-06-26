@@ -5,7 +5,6 @@ from utils.meter import AverageMeter
 from utils.metrics import Evaluator
 from utils.comm import get_rank, synchronize
 from torch.utils.tensorboard import SummaryWriter
-from datasets.target_pool import TargetPoolManager
 
 
 def meter_scalar(value):
@@ -30,14 +29,28 @@ def _move_batch(batch, device, skip_images=False):
     moved = {}
     for key, value in batch.items():
         if skip_images and key == "images":
-            moved[key] = value
+            continue
         else:
             moved[key] = value.to(device) if torch.is_tensor(value) else value
     return moved
 
 
+def _target_enrichment_active(args, epoch):
+    enrichment_start = getattr(args, "enrichment_start", 1)
+    if enrichment_start < 1:
+        raise ValueError("--enrichment_start must be a positive integer")
+    return getattr(args, "target_enrichment", False) and epoch >= enrichment_start
+
+
+def _should_run_eval(args, epoch):
+    eval_after_epoch = getattr(args, "eval_after_epoch", 0)
+    if eval_after_epoch < 0:
+        raise ValueError("--eval_after_epoch must be a non-negative integer")
+    return epoch >= eval_after_epoch
+
+
 def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
-             scheduler, checkpointer):
+             scheduler, checkpointer, target_pool=None):
 
     log_period = args.log_period
     eval_period = args.eval_period
@@ -50,6 +63,18 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
     logger = logging.getLogger("IRRA.train")
     logger.info('start training')
+    if target_pool is not None and getattr(args, "enrichment_start", 1) > 1:
+        logger.info(
+            "Target enrichment delayed until epoch {}; earlier epochs use host training only".format(
+                args.enrichment_start
+            )
+        )
+    if getattr(args, "eval_after_epoch", 0) > 0:
+        logger.info(
+            "Evaluation delayed until epoch {}; earlier epochs skip validation".format(
+                args.eval_after_epoch
+            )
+        )
 
     meters = {name: AverageMeter() for name in [
         "loss", "sdm_loss", "itc_loss", "id_loss", "mlm_loss", "target_enrichment_loss",
@@ -57,8 +82,12 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
     ]}
     tb_writer = SummaryWriter(log_dir=args.output_dir)
 
-    target_pool = TargetPoolManager(train_loader.dataset, args, logger) if bool(getattr(args, "target_enrichment", False)) else None
     best_top1 = 0.0
+    if _should_run_eval(args, 0):
+        _ = evaluator.eval(
+            model.eval(),
+            use_target_enrichment=_target_enrichment_active(args, start_epoch),
+        )
 
     for epoch in range(start_epoch, num_epoch + 1):
         start_time = time.time()
@@ -68,8 +97,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
 
         for n_iter, batch in enumerate(train_loader):
             global_step = arguments["iteration"] + 1
-            use_target = target_pool is not None and epoch >= int(getattr(args, "enrichment_start", 1))
-            skip_images = bool(getattr(args, "pnp_text_only", False)) and use_target
+            use_target = target_pool is not None and _target_enrichment_active(args, epoch)
+            skip_images = bool(getattr(args, "pnp_text_only", False))
             batch = _move_batch(batch, device, skip_images=skip_images)
 
             target_cache = None
@@ -117,13 +146,19 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                 "Epoch {} done. Time per batch: {:.3f}[s] Speed: {:.1f}[samples/s]"
                 .format(epoch, time_per_batch,
                         train_loader.batch_size / time_per_batch))
-        if epoch % eval_period == 0:
+        if epoch % eval_period == 0 and _should_run_eval(args, epoch):
             if get_rank() == 0:
                 logger.info("Validation Results - Epoch: {}".format(epoch))
                 if args.distributed:
-                    top1 = evaluator.eval(model.module.eval())
+                    top1 = evaluator.eval(
+                        model.module.eval(),
+                        use_target_enrichment=_target_enrichment_active(args, epoch),
+                    )
                 else:
-                    top1 = evaluator.eval(model.eval())
+                    top1 = evaluator.eval(
+                        model.eval(),
+                        use_target_enrichment=_target_enrichment_active(args, epoch),
+                    )
 
                 torch.cuda.empty_cache()
                 if best_top1 < top1:

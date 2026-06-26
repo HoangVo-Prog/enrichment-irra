@@ -169,8 +169,8 @@ class IRRA(nn.Module):
         ret = dict()
         caption_ids = batch['caption_ids']
         use_target = target_cache is not None and self.target_enricher is not None
-        use_host_loss = (not use_target) or bool(getattr(self.args, "use_host_loss", True))
-        compute_images = use_host_loss or not bool(getattr(self.args, "pnp_text_only", False)) or not use_target
+        use_host_loss = bool(getattr(self.args, "use_host_loss", True))
+        compute_images = use_host_loss or not bool(getattr(self.args, "pnp_text_only", False))
 
         image_feats = None
         i_feats = None
@@ -259,14 +259,12 @@ class IRRA(nn.Module):
                 pred = scores.max(1)[1]
                 ret.update({'mlm_acc': (pred == mlm_labels).float().mean()})
 
-        host_loss = sum(host_losses) if host_losses else t_feats.new_tensor(0.0)
-        if use_target and use_host_loss:
-            ret["host_loss"] = host_loss
-        total_loss = host_loss if use_host_loss else t_feats.new_tensor(0.0)
-        if use_target and use_host_loss:
-            total_loss = float(getattr(self.args, "lambda_host", 1.0)) * host_loss
+        zero = t_feats.float().sum() * 0.0
+        host_loss = sum(host_losses) if use_host_loss and host_losses else zero
+        total_loss = float(getattr(self.args, "lambda_host", 1.0)) * host_loss if use_host_loss else zero
         if target_loss is not None:
             total_loss = total_loss + target_loss
+        ret["host_loss"] = host_loss
         ret["loss"] = total_loss
         return ret
 
