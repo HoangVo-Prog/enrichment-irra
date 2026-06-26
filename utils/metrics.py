@@ -90,10 +90,6 @@ def _scale_scores_like(scores, reference, eps=1e-12):
     return (scores - score_min) / score_range * ref_range + ref_min
 
 
-def _retrieval_fusion_lambdas():
-    return [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.68, 0.32]
-
-
 def _prototype_lambdas():
     return [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
@@ -102,11 +98,6 @@ def _format_lambda(value):
     if abs(value - round(value)) < 1e-12:
         return str(int(round(value)))
     return "{:.2f}".format(value).rstrip("0").rstrip(".")
-
-
-def _scaled_fuse(primary_scores, secondary_scores, primary_weight):
-    scaled_secondary = _scale_scores_like(secondary_scores, primary_scores)
-    return primary_weight * primary_scores + (1.0 - primary_weight) * scaled_secondary
 
 
 def _ablation_lambda_from_key(key):
@@ -167,13 +158,6 @@ class Evaluator():
     def _iter_base_tasks(self, sims_global, sims_retrieval):
         yield "global", sims_global
         yield "retrieval", sims_retrieval
-        for lambda_value in _retrieval_fusion_lambdas():
-            alpha = _format_lambda(lambda_value)
-            yield "global+retrieval({})".format(alpha), _scaled_fuse(
-                sims_global,
-                sims_retrieval,
-                lambda_value,
-            )
 
     def _target_scores(self, model, qfeats, rqfeats):
         args = self._active_args(model)
@@ -204,6 +188,7 @@ class Evaluator():
         if sims_target is None:
             return
 
+        yield "target+proto(1)", sims_target
         for proto_lambda in _prototype_lambdas():
             proto_value = _format_lambda(proto_lambda)
             for base_name, base_scores in base_tasks:
@@ -213,7 +198,6 @@ class Evaluator():
                     (1.0 - proto_lambda) * scaled_base_scores
                     + proto_lambda * sims_target
                 )
-        yield "target+proto(1)", sims_target
 
     def eval(self, model, i2t_metric=False, use_target_enrichment=None):
         args = self._active_args(model)
@@ -279,9 +263,12 @@ class Evaluator():
                 best_ablation_task = key
                 best_ablation_row = row
 
+        if best_row is not None:
+            top1 = float(best_row[1])
+        else:
+            top1 = 0.0
+
         if best_ablation_row is not None:
-            top1 = float(best_ablation_row[1])
-            best_task = best_ablation_task
             eval_metrics["eval/ablation_best_R1"] = float(best_ablation_row[1])
             eval_metrics["eval/ablation_best_R5"] = float(best_ablation_row[2])
             eval_metrics["eval/ablation_best_R10"] = float(best_ablation_row[3])
@@ -291,10 +278,6 @@ class Evaluator():
             eval_metrics["eval/ablation_best_lambda"] = _ablation_lambda_from_key(
                 best_ablation_task
             )
-        elif best_row is not None:
-            top1 = float(best_row[1])
-        else:
-            top1 = 0.0
 
         target_key = "global+proto(1)"
         if "global" in rows_by_task and target_key in rows_by_task:

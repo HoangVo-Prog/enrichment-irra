@@ -112,6 +112,38 @@ def _format_learning_rates(scheduler):
     return "/".join("{:.2e}".format(value) for value in unique_values)
 
 
+def _format_loss_meters(meters):
+    preferred_keys = (
+        "loss",
+        "host_loss",
+        "sdm_loss",
+        "itc_loss",
+        "id_loss",
+        "mlm_loss",
+        "cmpm_loss",
+        "target_enrichment_loss",
+        "target_retrieval_loss",
+    )
+    ordered_keys = []
+    seen = set()
+    for key in preferred_keys:
+        if key in meters:
+            ordered_keys.append(key)
+            seen.add(key)
+    for key in sorted(meters.keys()):
+        if key not in seen and _is_loss_key(key):
+            ordered_keys.append(key)
+
+    parts = []
+    for key in ordered_keys:
+        meter = meters[key]
+        if meter.count <= 0:
+            continue
+        label = "total_loss" if key == "loss" else key
+        parts.append("{}: {:.4f}".format(label, meter.avg))
+    return ", ".join(parts) if parts else "total_loss: 0.0000"
+
+
 def _move_batch(batch, device, skip_images=False):
     moved = {}
     for key, value in batch.items():
@@ -372,14 +404,13 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             arguments["iteration"] = global_step
 
             if (n_iter + 1) % log_period == 0:
-                loss_avg = meters["loss"].avg if meters["loss"].count > 0 else 0.0
                 grad_avg = meters["grad_norm"].avg if meters["grad_norm"].count > 0 else 0.0
                 logger.info(
-                    "Epoch[{}] Iteration[{}/{}], train_loss: {:.4f}, grad_norm: {:.4f}, lr: {}".format(
+                    "Epoch[{}] Iteration[{}/{}], {}, grad_norm: {:.4f}, lr: {}".format(
                         epoch,
                         n_iter + 1,
                         len(train_loader),
-                        loss_avg,
+                        _format_loss_meters(meters),
                         grad_avg,
                         _format_learning_rates(scheduler),
                     )
