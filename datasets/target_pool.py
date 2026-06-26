@@ -13,6 +13,13 @@ def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
 
+def _loader_batch_size(args, primary_name, fallback_name="test_batch_size", default=1):
+    value = getattr(args, primary_name, None)
+    if value is None:
+        value = getattr(args, fallback_name, default)
+    return max(1, int(value))
+
+
 class _PoolImageDataset(Dataset):
     def __init__(self, records, transform):
         self.records = records
@@ -214,7 +221,7 @@ class TargetPoolManager:
     def _topk_chunks(self, queries, images, rank_depth):
         chunks = []
         chunk_size = min(
-            max(1, getattr(self.args, "test_batch_size", 1)),
+            _loader_batch_size(self.args, "target_query_batch_size"),
             max(1, queries.shape[0]),
         )
         for start in range(0, queries.shape[0], chunk_size):
@@ -225,7 +232,7 @@ class TargetPoolManager:
     def _hybrid_topk_chunks(self, global_queries, global_images, retrieval_queries, retrieval_images, rank_depth):
         chunks = []
         chunk_size = min(
-            max(1, getattr(self.args, "test_batch_size", 1)),
+            _loader_batch_size(self.args, "target_query_batch_size"),
             max(1, global_queries.shape[0]),
         )
         weight = float(getattr(self.args, "topm_rank_lambda", 0.5))
@@ -247,7 +254,7 @@ class TargetPoolManager:
         dataset = _PoolImageDataset(records, self.transform)
         loader = DataLoader(
             dataset,
-            batch_size=min(max(1, getattr(self.args, "test_batch_size", 1)), max(1, len(records))),
+            batch_size=min(_loader_batch_size(self.args, "target_cache_batch_size"), max(1, len(records))),
             shuffle=False,
             num_workers=getattr(self.args, "num_workers", 0),
             worker_init_fn=seed_worker,
@@ -293,7 +300,7 @@ class TargetPoolManager:
         )
         loader = DataLoader(
             dataset,
-            batch_size=min(max(1, getattr(self.args, "test_batch_size", 1)), max(1, len(self.query_records))),
+            batch_size=min(_loader_batch_size(self.args, "target_query_batch_size"), max(1, len(self.query_records))),
             shuffle=False,
             num_workers=getattr(self.args, "num_workers", 0),
             worker_init_fn=seed_worker,

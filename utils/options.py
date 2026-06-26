@@ -311,6 +311,10 @@ def get_args():
         parser.error("--recompute_level must be epoch or step")
     if args.recompute_interval != -1 and args.recompute_interval < 1:
         parser.error("--recompute_interval must be -1 or a positive integer")
+    if args.target_cache_batch_size < 1:
+        parser.error("--target_cache_batch_size must be a positive integer")
+    if args.target_query_batch_size < 1:
+        parser.error("--target_query_batch_size must be a positive integer")
     if args.evidence_projection not in ("auto", "linear", "none"):
         parser.error("--evidence_projection must be auto, linear, or none")
     if args.context_module != "mixer":
