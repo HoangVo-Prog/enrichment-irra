@@ -137,3 +137,5 @@ def test_gate_modes_and_normalized_output():
     static = TargetPrototypeEnricher(args(extractor_mode="global", residual_gate="static", gate_mode="static", enrich_gamma=0.25), 4, 4, 4)
     out_static = static(query, query, None, cache)
     assert torch.allclose(out_static["gate"], torch.full_like(out_static["gate"], 0.25))
+    assert "static_gate" not in dict(static.named_buffers())
+    assert sum(buffer.numel() for _name, buffer in static.named_buffers()) == 0

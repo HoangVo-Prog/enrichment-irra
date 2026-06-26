@@ -496,6 +496,7 @@ class TargetPrototypeEnricher(nn.Module):
         self.temperature = float(_arg(args, "temperature", 0.02))
         self.tau = float(_arg(args, "tau", 0.015))
         self.gate_mode = str(_arg(args, "gate_mode", _arg(args, "residual_gate", "residual"))).lower()
+        self.gamma = _arg(args, "enrich_gamma", None)
         self.active_dim = self.global_dim if self.enrichment_space == "global" else self.retrieval_dim
         self.proto_to_global = nn.Identity() if self.evidence_dim == self.global_dim else nn.Linear(self.evidence_dim, self.global_dim)
         self.proto_to_retrieval = nn.Identity() if self.evidence_dim == self.retrieval_dim else nn.Linear(self.evidence_dim, self.retrieval_dim)
@@ -533,7 +534,7 @@ class TargetPrototypeEnricher(nn.Module):
             nn.init.constant_(last.bias, math.log(0.1 / 0.9))
         else:
             self.residual_gate = None
-            self.register_buffer("static_gate", torch.tensor(float(_arg(args, "enrich_gamma", 0.1))))
+            self.gamma = float(self.gamma)
 
     def enrich_only(self, query_features, host_text_features, pool_cache, space=None, grab_text_features=None):
         out = self.forward(query_features, host_text_features, None, pool_cache, space=space, grab_text_features=grab_text_features)
@@ -566,7 +567,7 @@ class TargetPrototypeEnricher(nn.Module):
         interaction = q * context
         delta = self.fusion_mlp(torch.cat([q, context, interaction], dim=-1))
         if self.gate_mode == "static":
-            gate = self.static_gate.to(device=q.device, dtype=q.dtype).expand(q.shape[0], 1)
+            gate = q.new_full((q.shape[0], 1), self.gamma)
         else:
             gate = torch.sigmoid(self.residual_gate(torch.cat([q, context, interaction], dim=-1)))
         enriched = _normalize(q + gate * delta)
