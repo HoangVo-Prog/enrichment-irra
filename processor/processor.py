@@ -330,6 +330,10 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
             model.eval(),
             use_target_enrichment=_target_enrichment_active(args, start_epoch),
         )
+        # Evaluation materializes full-gallery score tables; clear cached blocks
+        # after the eval frame releases its temporary tensors.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         if get_rank() == 0:
             initial_metrics = dict(getattr(evaluator, "last_metrics", {}))
             initial_metrics["eval/top_R1"] = initial_top1
@@ -482,7 +486,8 @@ def do_train(start_epoch, args, model, train_loader, evaluator, optimizer,
                     )
                 )
 
-                torch.cuda.empty_cache()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 if new_best:
                     if wandb_run is not None:
                         wandb_run.summary["best_R1"] = float(best_top1)
@@ -501,3 +506,5 @@ def do_inference(model, test_img_loader, test_txt_loader, args=None):
         args = getattr(model, "args", None)
     evaluator = Evaluator(test_img_loader, test_txt_loader, args)
     _ = evaluator.eval(model.eval())
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
