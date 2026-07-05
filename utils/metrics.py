@@ -105,52 +105,6 @@ def _ablation_lambda_from_key(key):
     return float(match.group(1)) if match else 0.0
 
 
-def _clear_cuda_cache_if_available():
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
-def _log_cuda_memory(logger, label):
-    if not torch.cuda.is_available():
-        return
-    device = torch.cuda.current_device()
-    mib = 1024.0 ** 2
-    logger.info(
-        "CUDA memory %s: allocated=%.1fMiB reserved=%.1fMiB max_allocated=%.1fMiB",
-        label,
-        torch.cuda.memory_allocated(device) / mib,
-        torch.cuda.memory_reserved(device) / mib,
-        torch.cuda.max_memory_allocated(device) / mib,
-    )
-
-
-def _log_cache_tensors(logger, label, cache):
-    if not isinstance(cache, dict):
-        return
-    keys = (
-        "host_image_features",
-        "retrieval_features",
-        "grab_image_features",
-        "evidence_bank",
-        "prototypes",
-        "pids",
-    )
-    parts = []
-    for key in keys:
-        value = cache.get(key)
-        if torch.is_tensor(value):
-            parts.append(
-                "{} shape={} device={} dtype={}".format(
-                    key,
-                    tuple(value.shape),
-                    value.device,
-                    value.dtype,
-                )
-            )
-    if parts:
-        logger.info("%s cache tensors: %s", label, "; ".join(parts))
-
-
 def _unwrap_model(model):
     return model.module if hasattr(model, "module") else model
 
@@ -178,29 +132,27 @@ class Evaluator():
         rqfeats, rgfeats = [], []
         for pid, caption in self.txt_loader:
             caption = caption.to(device)
-            with torch.inference_mode():
+            with torch.no_grad():
                 text_feat = model.encode_clip_global_text(caption)
                 retrieval_text = model.encode_retrieval_text(caption)
             qids.append(pid.view(-1))
-            # Evaluation embeddings are reused only for scoring; CPU storage avoids
-            # keeping full query/gallery banks live on GPU across ablation rows.
-            qfeats.append(text_feat.detach().cpu())
-            rqfeats.append(retrieval_text.detach().cpu())
-        qids = torch.cat(qids, 0).cpu()
-        qfeats = torch.cat(qfeats, 0).cpu()
-        rqfeats = torch.cat(rqfeats, 0).cpu()
+            qfeats.append(text_feat)
+            rqfeats.append(retrieval_text)
+        qids = torch.cat(qids, 0)
+        qfeats = torch.cat(qfeats, 0)
+        rqfeats = torch.cat(rqfeats, 0)
 
         for pid, img in self.img_loader:
             img = img.to(device)
-            with torch.inference_mode():
+            with torch.no_grad():
                 img_feat = model.encode_clip_global_image(img)
                 retrieval_img = model.encode_retrieval_image(img)
             gids.append(pid.view(-1))
-            gfeats.append(img_feat.detach().cpu())
-            rgfeats.append(retrieval_img.detach().cpu())
-        gids = torch.cat(gids, 0).cpu()
-        gfeats = torch.cat(gfeats, 0).cpu()
-        rgfeats = torch.cat(rgfeats, 0).cpu()
+            gfeats.append(img_feat)
+            rgfeats.append(retrieval_img)
+        gids = torch.cat(gids, 0)
+        gfeats = torch.cat(gfeats, 0)
+        rgfeats = torch.cat(rgfeats, 0)
         return qfeats, gfeats, rqfeats, rgfeats, qids, gids
 
     def _iter_base_tasks(self, sims_global, sims_retrieval):
@@ -210,33 +162,23 @@ class Evaluator():
     def _target_scores(self, model, qfeats, rqfeats):
         args = self._active_args(model)
         target_cache, _ = compute_target_gallery_cache(model, self.img_loader)
-        _log_cache_tensors(self.logger, "Evaluation target gallery", target_cache)
-        retrieval_images = F.normalize(target_cache["retrieval_features"].detach().cpu().float(), p=2, dim=1)
+        retrieval_images = F.normalize(target_cache["retrieval_features"].float(), p=2, dim=1)
         space = normalize_enrichment_space(getattr(args, "enrichment_space", "global"))
         query_bank = rqfeats if space == "retrieval" else qfeats
         chunks = []
-        device = next(model.parameters()).device
         batch_size = int(getattr(args, "target_query_batch_size", getattr(args, "test_batch_size", 512)))
-        with torch.inference_mode():
+        with torch.no_grad():
             for start in range(0, query_bank.shape[0], batch_size):
                 end = start + batch_size
-                query_chunk = query_bank[start:end].to(device)
-                host_chunk = qfeats[start:end].to(device)
-                alt_chunk = rqfeats[start:end].to(device)
                 enriched = model.enrich_text_features(
-                    query_features=query_chunk,
-                    host_text_features=host_chunk,
+                    query_features=query_bank[start:end],
+                    host_text_features=qfeats[start:end],
                     target_cache=target_cache,
-                    alt_text_features=alt_chunk,
+                    alt_text_features=rqfeats[start:end],
                 )
-                chunks.append(F.normalize(enriched, p=2, dim=1).detach().cpu())
-                del query_chunk, host_chunk, alt_chunk, enriched
-        enriched_queries = torch.cat(chunks, dim=0).cpu()
-        sims = enriched_queries @ retrieval_images.t()
-        del target_cache, retrieval_images, enriched_queries, chunks
-        _clear_cuda_cache_if_available()
-        _log_cuda_memory(self.logger, "after target-aware scoring")
-        return sims
+                chunks.append(F.normalize(enriched, p=2, dim=1))
+        enriched_queries = torch.cat(chunks, dim=0)
+        return enriched_queries @ retrieval_images.t()
 
     def _iter_eval_tasks(self, sims_global, sims_retrieval, sims_target):
         base_tasks = list(self._iter_base_tasks(sims_global, sims_retrieval))
@@ -262,8 +204,6 @@ class Evaluator():
         if use_target_enrichment is None:
             use_target_enrichment = bool(getattr(args, "target_enrichment", False))
 
-        self.logger.info("Starting evaluation feature extraction")
-        _log_cuda_memory(self.logger, "before evaluation")
         qfeats, gfeats, rqfeats, rgfeats, qids, gids = self._compute_embedding(model)
         qfeats = F.normalize(qfeats, p=2, dim=1)
         gfeats = F.normalize(gfeats, p=2, dim=1)
@@ -272,13 +212,6 @@ class Evaluator():
 
         sims_global = qfeats @ gfeats.t()
         sims_retrieval = rqfeats @ rgfeats.t()
-        self.logger.info(
-            "Evaluation similarity matrices ready on CPU: queries={} gallery={}".format(
-                qfeats.shape[0],
-                gfeats.shape[0],
-            )
-        )
-        _log_cuda_memory(self.logger, "after evaluation feature extraction")
         sims_target = None
         if use_target_enrichment and getattr(_unwrap_model(model), "target_enricher", None) is not None:
             sims_target = self._target_scores(model, qfeats, rqfeats)
@@ -291,12 +224,7 @@ class Evaluator():
         best_ablation_task = None
         best_ablation_row = None
 
-        total_tasks = 2
-        if sims_target is not None:
-            total_tasks += 1 + len(_prototype_lambdas()) * 2
-        self.logger.info("Scoring %d evaluation tasks sequentially", total_tasks)
-        for task_idx, (key, similarity) in enumerate(self._iter_eval_tasks(sims_global, sims_retrieval, sims_target), 1):
-            self.logger.debug("Evaluation task %d/%d start: %s", task_idx, total_tasks, key)
+        for key, similarity in self._iter_eval_tasks(sims_global, sims_retrieval, sims_target):
             row = get_metrics(similarity, qids, gids, "{}-t2i".format(key), False)
             table.add_row(row)
             rows_by_task[key] = row
@@ -334,7 +262,6 @@ class Evaluator():
             ):
                 best_ablation_task = key
                 best_ablation_row = row
-            self.logger.debug("Evaluation task %d/%d end: %s", task_idx, total_tasks, key)
 
         if best_row is not None:
             top1 = float(best_row[1])
@@ -372,6 +299,4 @@ class Evaluator():
         self.logger.info('\n' + "best R1 = " + str(top1))
         if best_task is not None:
             self.logger.info("best R1 row = {}".format(best_task))
-        _clear_cuda_cache_if_available()
-        _log_cuda_memory(self.logger, "after evaluation")
         return top1

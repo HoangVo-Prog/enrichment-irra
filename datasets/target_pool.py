@@ -20,45 +20,6 @@ def _loader_batch_size(args, primary_name, fallback_name="test_batch_size", defa
     return max(1, int(value))
 
 
-def _cache_tensor_summary(cache):
-    keys = (
-        "host_image_features",
-        "retrieval_features",
-        "grab_image_features",
-        "evidence_bank",
-        "prototypes",
-        "pids",
-        "top_indices",
-    )
-    parts = []
-    for key in keys:
-        value = cache.get(key)
-        if torch.is_tensor(value):
-            parts.append(
-                "{} shape={} device={} dtype={}".format(
-                    key,
-                    tuple(value.shape),
-                    value.device,
-                    value.dtype,
-                )
-            )
-    return "; ".join(parts)
-
-
-def _log_cuda_memory(logger, label):
-    if logger is None or not torch.cuda.is_available():
-        return
-    device = torch.cuda.current_device()
-    mib = 1024.0 ** 2
-    logger.info(
-        "CUDA memory %s: allocated=%.1fMiB reserved=%.1fMiB max_allocated=%.1fMiB",
-        label,
-        torch.cuda.memory_allocated(device) / mib,
-        torch.cuda.memory_reserved(device) / mib,
-        torch.cuda.max_memory_allocated(device) / mib,
-    )
-
-
 class _PoolImageDataset(Dataset):
     def __init__(self, records, transform):
         self.records = records
@@ -179,13 +140,6 @@ class TargetPoolManager:
         interval_id = self._interval_id(epoch, step)
         needs_rebuild = self.cache is None or (self._recompute_interval() != -1 and interval_id != self.cache_interval_id)
         if needs_rebuild:
-            if self.logger is not None:
-                self.logger.info(
-                    "Target-pool cache miss: interval={} previous_interval={}".format(
-                        interval_id,
-                        self.cache_interval_id,
-                    )
-                )
             self.cache = self._encode_records(model, self.image_records)
             self.cache_interval_id = interval_id
             self.cache_returned = False
@@ -197,15 +151,6 @@ class TargetPoolManager:
                         getattr(self.args, "top_m", 1),
                     )
                 )
-                self.logger.info("Target-pool cache tensors: %s", _cache_tensor_summary(self.cache))
-                _log_cuda_memory(self.logger, "after target-pool cache build")
-        elif self.logger is not None:
-            self.logger.debug(
-                "Target-pool cache hit: interval={} images={}".format(
-                    interval_id,
-                    len(self.image_records),
-                )
-            )
         diagnostics = {
             "pool_interval_id": float(interval_id),
             "pool_interval_reused": 1.0 if self.cache_returned else 0.0,
@@ -218,16 +163,7 @@ class TargetPoolManager:
 
     def _get_frozen_cache(self, model, batch):
         if self.frozen_cache is None or self.frozen_rank_indices is None:
-            if self.logger is not None:
-                self.logger.info("Frozen target-pool cache miss: building full-gallery index")
             self._build_frozen_cache(model)
-        elif self.logger is not None:
-            self.logger.debug(
-                "Frozen target-pool cache hit: returned={} images={}".format(
-                    self.frozen_returned,
-                    len(self.image_records),
-                )
-            )
         if "index" not in batch:
             raise KeyError("frozen-index target enrichment requires batch['index']")
         query_indices = batch["index"].detach().long().cpu()
@@ -235,7 +171,7 @@ class TargetPoolManager:
             raise ValueError("batch query index out of frozen-rank range")
         rank_depth = self.frozen_index_depth
         depth = min(int(getattr(self.args, "top_m", 32)), rank_depth)
-        top_indices = self.frozen_rank_indices[query_indices, :depth]
+        top_indices = self.frozen_rank_indices[query_indices, :depth].to(self.frozen_cache["host_image_features"].device)
         diagnostics = {
             "pool_interval_id": 0.0,
             "pool_interval_reused": 1.0 if self.frozen_returned else 0.0,
@@ -281,8 +217,6 @@ class TargetPoolManager:
                     rank_depth,
                 )
             )
-            self.logger.info("Frozen target-pool cache tensors: %s", _cache_tensor_summary(self.frozen_cache))
-            _log_cuda_memory(self.logger, "after frozen target-pool build")
 
     def _topk_chunks(self, queries, images, rank_depth):
         chunks = []
@@ -290,10 +224,9 @@ class TargetPoolManager:
             _loader_batch_size(self.args, "target_query_batch_size"),
             max(1, queries.shape[0]),
         )
-        with torch.inference_mode():
-            for start in range(0, queries.shape[0], chunk_size):
-                scores = F.normalize(queries[start:start + chunk_size].float(), p=2, dim=-1) @ images.t()
-                chunks.append(torch.topk(scores, k=rank_depth, dim=1, largest=True, sorted=True).indices.cpu())
+        for start in range(0, queries.shape[0], chunk_size):
+            scores = F.normalize(queries[start:start + chunk_size].float(), p=2, dim=-1) @ images.t()
+            chunks.append(torch.topk(scores, k=rank_depth, dim=1, largest=True, sorted=True).indices.cpu())
         return torch.cat(chunks, dim=0)
 
     def _hybrid_topk_chunks(self, global_queries, global_images, retrieval_queries, retrieval_images, rank_depth):
@@ -303,13 +236,12 @@ class TargetPoolManager:
             max(1, global_queries.shape[0]),
         )
         weight = float(getattr(self.args, "topm_rank_lambda", 0.5))
-        with torch.inference_mode():
-            for start in range(0, global_queries.shape[0], chunk_size):
-                end = start + chunk_size
-                global_scores = F.normalize(global_queries[start:end].float(), p=2, dim=-1) @ global_images.t()
-                retrieval_scores = F.normalize(retrieval_queries[start:end].float(), p=2, dim=-1) @ retrieval_images.t()
-                scores = weight * global_scores + (1 - weight) * retrieval_scores
-                chunks.append(torch.topk(scores, k=rank_depth, dim=1, largest=True, sorted=True).indices.cpu())
+        for start in range(0, global_queries.shape[0], chunk_size):
+            end = start + chunk_size
+            global_scores = F.normalize(global_queries[start:end].float(), p=2, dim=-1) @ global_images.t()
+            retrieval_scores = F.normalize(retrieval_queries[start:end].float(), p=2, dim=-1) @ retrieval_images.t()
+            scores = weight * global_scores + (1 - weight) * retrieval_scores
+            chunks.append(torch.topk(scores, k=rank_depth, dim=1, largest=True, sorted=True).indices.cpu())
         return torch.cat(chunks, dim=0)
 
     def _encode_records(self, model, records):
@@ -329,20 +261,15 @@ class TargetPoolManager:
             generator=seeded_generator(self.seed + 801),
         )
         chunks = []
-        try:
-            with torch.inference_mode():
-                for _pid, _image_id, images in loader:
-                    images = images.to(device)
-                    chunk = module.encode_target_image_cache(images, cache_prototypes=True)
-                    # Cache banks are inference artifacts; detach and store on CPU
-                    # so they do not pin gallery-sized tensors on GPU between batches.
-                    chunks.append({key: value.detach().cpu() for key, value in chunk.items()})
-        finally:
-            if was_training:
-                module.train()
-        cache = self._concat_cache_chunks(chunks, torch.device("cpu"))
-        cache["image_ids"] = torch.tensor([record["image_id"] for record in records], device="cpu", dtype=torch.long)
-        cache["pids"] = torch.tensor([record["pid"] for record in records], device="cpu", dtype=torch.long)
+        with torch.no_grad():
+            for _pid, _image_id, images in loader:
+                images = images.to(device)
+                chunks.append(module.encode_target_image_cache(images, cache_prototypes=True))
+        if was_training:
+            module.train()
+        cache = self._concat_cache_chunks(chunks, device)
+        cache["image_ids"] = torch.tensor([record["image_id"] for record in records], device=device, dtype=torch.long)
+        cache["pids"] = torch.tensor([record["pid"] for record in records], device=device, dtype=torch.long)
         cache = module.finalize_target_cache(cache)
         return cache
 
@@ -382,17 +309,15 @@ class TargetPoolManager:
         was_training = module.training
         module.eval()
         chunks = []
-        try:
-            with torch.inference_mode():
-                for _pid, _query_index, tokens in loader:
-                    tokens = tokens.to(device)
-                    if normalize_enrichment_space(space) == "retrieval":
-                        chunks.append(module.encode_retrieval_text(tokens).detach().cpu())
-                    else:
-                        chunks.append(module.encode_clip_global_text(tokens).detach().cpu())
-        finally:
-            if was_training:
-                module.train()
+        with torch.no_grad():
+            for _pid, _query_index, tokens in loader:
+                tokens = tokens.to(device)
+                if normalize_enrichment_space(space) == "retrieval":
+                    chunks.append(module.encode_retrieval_text(tokens))
+                else:
+                    chunks.append(module.encode_clip_global_text(tokens))
+        if was_training:
+            module.train()
         return torch.cat(chunks, dim=0)
 
 
@@ -403,18 +328,15 @@ def compute_target_gallery_cache(model, img_loader):
     module.eval()
     chunks = []
     gids = []
-    try:
-        with torch.inference_mode():
-            for pid, images in img_loader:
-                images = images.to(device)
-                chunk = module.encode_target_image_cache(images, cache_prototypes=True)
-                chunks.append({key: value.detach().cpu() for key, value in chunk.items()})
-                gids.append(pid.view(-1).detach().cpu())
-    finally:
-        if was_training:
-            module.train()
-    cache = TargetPoolManager._concat_cache_chunks(chunks, torch.device("cpu"))
-    cache["pids"] = torch.cat(gids, dim=0).long()
-    cache["image_ids"] = torch.arange(cache["pids"].shape[0], device="cpu", dtype=torch.long)
+    with torch.no_grad():
+        for pid, images in img_loader:
+            images = images.to(device)
+            chunks.append(module.encode_target_image_cache(images, cache_prototypes=True))
+            gids.append(pid.view(-1))
+    if was_training:
+        module.train()
+    cache = TargetPoolManager._concat_cache_chunks(chunks, device)
+    cache["pids"] = torch.cat(gids, dim=0).to(device).long()
+    cache["image_ids"] = torch.arange(cache["pids"].shape[0], device=device, dtype=torch.long)
     cache = module.finalize_target_cache(cache)
     return cache, torch.cat(gids, dim=0)

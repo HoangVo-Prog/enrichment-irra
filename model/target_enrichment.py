@@ -540,22 +540,6 @@ class TargetPrototypeEnricher(nn.Module):
         out = self.forward(query_features, host_text_features, None, pool_cache, space=space, grab_text_features=grab_text_features)
         return out["enriched_features"]
 
-    def _cache_tensor(self, pool_cache, key, device, dtype=torch.float32):
-        # Target caches are detached feature banks. Moving them here keeps the
-        # long-lived cache CPU-resident while preserving the same full-gallery math.
-        return pool_cache[key].detach().to(device=device, dtype=dtype, non_blocking=True)
-
-    def _gather_bank(self, bank, top_indices, trailing_shape):
-        flat_indices = top_indices.reshape(-1)
-        if bank.device == top_indices.device:
-            gathered = bank.detach().index_select(0, flat_indices)
-        else:
-            # Gather large CPU banks before moving rows to GPU so evaluation does
-            # not materialize the full evidence bank on the device for each task.
-            gathered = bank.detach().cpu().index_select(0, flat_indices.detach().cpu())
-            gathered = gathered.to(device=top_indices.device, non_blocking=True)
-        return gathered.view(*top_indices.shape, *trailing_shape)
-
     def forward(self, query_features, host_text_features, query_pids, pool_cache, space=None, grab_text_features=None):
         space = normalize_enrichment_space(space or self.enrichment_space)
         if space != self.enrichment_space:
@@ -563,22 +547,20 @@ class TargetPrototypeEnricher(nn.Module):
         for key in ["host_image_features", "retrieval_features", "pids"]:
             if key not in pool_cache:
                 raise KeyError(f"target cache missing {key}")
-        device = query_features.device
-        host_images = _normalize(self._cache_tensor(pool_cache, "host_image_features", device))
-        retrieval_images = _normalize(self._cache_tensor(pool_cache, "retrieval_features", device))
+        host_images = _normalize(pool_cache["host_image_features"])
+        retrieval_images = _normalize(pool_cache["retrieval_features"])
         evidence_bank = pool_cache.get("evidence_bank", pool_cache.get("prototypes"))
         if evidence_bank is None:
             raise KeyError("target cache missing evidence_bank/prototypes")
-        evidence_bank = evidence_bank.detach()
+        evidence_bank = evidence_bank.float()
         if evidence_bank.shape[1] != self.num_slots:
             raise ValueError(f"evidence slot count mismatch: expected {self.num_slots}, got {evidence_bank.shape[1]}")
         if any(provider in TARGET_RELATIVE_PROVIDERS for provider in self.providers) and not pool_cache.get("target_evidence_finalized", False):
             raise ValueError("target-relative evidence requires finalized target cache")
-        pool_pids = self._cache_tensor(pool_cache, "pids", device, dtype=torch.long)
         q = _normalize(query_features)
         g = _normalize(host_text_features)
         top_indices = self._select_top_indices(q, g, host_images, retrieval_images, pool_cache, grab_text_features)
-        gathered = self._gather_bank(evidence_bank, top_indices, (evidence_bank.shape[1], evidence_bank.shape[2])).float()
+        gathered = evidence_bank[top_indices]
         gathered = self._apply_auxiliary_evidence(gathered, top_indices, pool_cache)
         selected = self._project_to_active_space(gathered, space)
         context = self.mixer(q, selected)
@@ -590,14 +572,14 @@ class TargetPrototypeEnricher(nn.Module):
             gate = torch.sigmoid(self.residual_gate(torch.cat([q, context, interaction], dim=-1)))
         enriched = _normalize(q + gate * delta)
         out = {"enriched_features": enriched, "top_indices": top_indices, "context": context, "gate": gate}
-        diagnostics = self._diagnostics(q, enriched, context, delta, gate, top_indices, g, host_images, query_pids, pool_pids)
+        diagnostics = self._diagnostics(q, enriched, context, delta, gate, top_indices, g, host_images, query_pids, pool_cache.get("pids"))
         diagnostics.update(self.mixer.last_diagnostics)
         diagnostics["mixer/context_norm"] = context.norm(dim=-1).mean().detach()
         diagnostics["mixer/context_delta_cosine"] = F.cosine_similarity(context, delta, dim=-1).mean().detach()
         diagnostics["mixer/output_delta_norm"] = delta.norm(dim=-1).mean().detach()
         out.update(diagnostics)
         if query_pids is not None:
-            loss = self._target_retrieval_loss(enriched, retrieval_images, query_pids, pool_pids)
+            loss = self._target_retrieval_loss(enriched, retrieval_images, query_pids, pool_cache["pids"])
             out["target_retrieval_loss"] = loss
             out["total_loss"] = loss * self.lambda_ret
         return out
@@ -622,7 +604,6 @@ class TargetPrototypeEnricher(nn.Module):
             elif self.topm_rank_space == "hybrid_global_retrieval":
                 alt_text = q if grab_text_features is None else _normalize(grab_text_features)
                 alt_images = pool_cache.get("grab_image_features", pool_cache["retrieval_features"])
-                alt_images = alt_images.detach().to(device=q.device, non_blocking=True)
                 alt_images = _normalize(alt_images)
                 if alt_text.shape[-1] != alt_images.shape[-1]:
                     raise ValueError("hybrid ranking dimension mismatch")
@@ -642,8 +623,7 @@ class TargetPrototypeEnricher(nn.Module):
         for provider, raw_key in vector_keys.items():
             if provider not in self.slot_map or raw_key not in pool_cache:
                 continue
-            raw_bank = pool_cache[raw_key]
-            selected = self._gather_bank(raw_bank, top_indices, (raw_bank.shape[-1],)).float()
+            selected = pool_cache[raw_key].to(result.device).float()[top_indices]
             if provider in self.raw_projectors:
                 selected = self.raw_projectors[provider](selected)
             result[:, :, self.slot_map[provider], :] = _normalize(selected).unsqueeze(2)
@@ -653,10 +633,9 @@ class TargetPrototypeEnricher(nn.Module):
                 continue
             if scalar_key not in pool_cache:
                 raise KeyError(f"target cache missing {scalar_key}")
-            scalar_bank = pool_cache[scalar_key]
-            selected = self._gather_bank(scalar_bank, top_indices, (1,)).float()
+            selected = pool_cache[scalar_key].to(result.device).float()[top_indices]
             projected = self.scalar_projectors[provider](selected)
-            result[:, :, self.slot_map[provider], :] = _normalize(projected).unsqueeze(2)
+            result[:, :, self.slot_map[provider], :] = _normalize(projected)
         return result
 
     def _project_to_active_space(self, gathered, space):
